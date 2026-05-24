@@ -57,22 +57,59 @@ def _split_natvis_token(token: str) -> tuple[str, str | None]:
     return expression.strip(), fmt.strip() or None
 
 
+def _strip_this(expression: str) -> str:
+    if expression.startswith("this->"):
+        return expression[6:].strip()
+    if expression.startswith("this."):
+        return expression[5:].strip()
+    return expression
+
+
+def _unwrap_parenthesized(expression: str) -> str:
+    expression = expression.strip()
+    while expression.startswith("(") and expression.endswith(")"):
+        depth = 0
+        wraps = True
+        for index, char in enumerate(expression):
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0 and index != len(expression) - 1:
+                    wraps = False
+                    break
+        if not wraps:
+            break
+        expression = expression[1:-1].strip()
+    return expression
+
+
 def _normalize_child_path(expression: str) -> str | None:
     expression = expression.strip()
-    if expression.startswith("this->"):
-        expression = expression[6:].strip()
-    elif expression.startswith("this."):
-        expression = expression[5:].strip()
+    dereference = False
+
+    if expression.startswith("*"):
+        dereference = True
+        expression = _unwrap_parenthesized(expression[1:].strip())
+
+    match = re.match(r"^\(\s*\*\s*([A-Za-z_]\w*)\s*\)\s*\.(.+)$", expression)
+    if match:
+        expression = match.group(1) + "->" + match.group(2).strip()
+
+    expression = _strip_this(expression)
 
     if not expression:
         return None
-    if "->" in expression:
+
+    if any(char in expression for char in '()+*/%&|^!=?:\\'):
         return None
-    if any(char in expression for char in '()+-*/%&|^!=<>?:\\'):
+
+    segment = r"[A-Za-z_]\w*(?:\[[0-9]+\])*"
+    path_pattern = rf"^{segment}(?:(?:\.|->){segment})*$"
+    if not re.match(path_pattern, expression):
         return None
-    if not re.match(r"^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*|\[[0-9]+\])*$", expression):
-        return None
-    return expression
+
+    return ("*" if dereference else "") + "var." + expression
 
 
 def _format_suffix(fmt: str | None, warnings: list[str], type_name: str, expression: str) -> str:
@@ -98,7 +135,7 @@ def _convert_expression_token(token: str, type_name: str, warnings: list[str]) -
             "as an LLDB summary string."
         )
         return "<unsupported:{}>".format(_escape_summary_literal(expression))
-    return "${var." + child_path + _format_suffix(fmt, warnings, type_name, expression) + "}"
+    return "${" + child_path + _format_suffix(fmt, warnings, type_name, expression) + "}"
 
 
 def natvis_display_to_lldb_summary(
@@ -153,7 +190,7 @@ def _summary_for_type(natvis_type: NatvisType, warnings: list[str]) -> str | Non
                 "cannot be represented as an LLDB summary string."
             )
             return None
-        return "${var." + child_path + "}"
+        return "${" + child_path + "}"
 
     return None
 

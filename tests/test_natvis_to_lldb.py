@@ -233,6 +233,31 @@ class NatvisToLldbTests(unittest.TestCase):
         self.assertEqual(summary, "size=${var.size_} ptr=<unsupported:data_ + 1>")
         self.assertTrue(any("cannot be represented" in warning for warning in warnings))
 
+    def test_txt_summary_generation_supports_pointer_paths(self):
+        warnings = []
+        summary = natvis_to_lldb_txt.natvis_display_to_lldb_summary(
+            "node={node_->id} first={*count_ptr_,d} self={this->owner_->name}",
+            "demo::PointerPaths",
+            warnings,
+        )
+
+        self.assertEqual(
+            summary,
+            "node=${var.node_->id} first=${*var.count_ptr_%d} self=${var.owner_->name}",
+        )
+        self.assertEqual(warnings, [])
+
+    def test_txt_summary_generation_supports_parenthesized_pointer_path(self):
+        warnings = []
+        summary = natvis_to_lldb_txt.natvis_display_to_lldb_summary(
+            "node={(*node_).id}",
+            "demo::PointerPaths",
+            warnings,
+        )
+
+        self.assertEqual(summary, "node=${var.node_->id}")
+        self.assertEqual(warnings, [])
+
     def test_generated_formatter_dereferences_pointer_context(self):
         result = natvis_to_lldb.parse_natvis(ROOT / "examples" / "sample.natvis")
         generated = natvis_to_lldb.generate_lldb_formatter(
