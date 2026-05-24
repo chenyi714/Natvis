@@ -93,6 +93,19 @@ LLDB children, and whether each `DisplayString`, `Item`, `Condition`, and
 `CustomListItems` expression was resolved through the safer SBValue path parser
 or had to fall back to LLDB expression evaluation.
 
+If your debug console does not show command output, write the same diagnostics
+to a file instead:
+
+```lldb
+natvis-debug-file body
+```
+
+By default this writes `/tmp/natvis_debug.txt`. You can choose another path with:
+
+```lldb
+natvis-debug-file body /tmp/body_natvis_debug.txt
+```
+
 ## Example
 
 ```sh

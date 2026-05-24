@@ -408,7 +408,10 @@ def generate_lldb_formatter(types: list[NatvisType], *, category: str, source_na
 
 from __future__ import annotations
 
+import os
 import re
+import shlex
+import tempfile
 
 try:
     import lldb
@@ -1729,24 +1732,29 @@ def _debug_find_value(debugger, expression):
 
 
 def _debug_write(result, text):
+    wrote_result = False
     try:
         result.PutCString(text)
+        wrote_result = True
     except Exception:
+        pass
+    try:
         print(text)
+    except Exception:
+        if not wrote_result:
+            raise
 
 
-def natvis_debug(debugger, command, result, internal_dict):
-    expression = (command or "").strip()
+def _natvis_debug_lines(debugger, expression):
+    expression = (expression or "").strip()
     if not expression:
-        _debug_write(result, "usage: natvis-debug <variable-or-expression>")
-        return
+        return ["usage: natvis-debug <variable-or-expression>"]
 
     lines = ["natvis-debug {}".format(expression)]
     value = _debug_find_value(debugger, expression)
     if value is None:
         lines.append("value not found in the selected frame")
-        _debug_write(result, "\\n".join(lines))
-        return
+        return lines
 
     lines.append("value: {}".format(_debug_describe_value(value)))
     _debug_raw_children(value, lines)
@@ -1754,12 +1762,44 @@ def natvis_debug(debugger, command, result, internal_dict):
     spec = _find_spec(value)
     if spec is None:
         lines.append("matched Natvis type: <none>")
-        _debug_write(result, "\\n".join(lines))
-        return
+        return lines
 
     lines.append("matched Natvis type: {}".format(spec.get("name")))
     _debug_spec_expressions(value, spec, lines)
-    _debug_write(result, "\\n".join(lines))
+    return lines
+
+
+def natvis_debug(debugger, command, result, internal_dict):
+    _debug_write(result, "\\n".join(_natvis_debug_lines(debugger, command)))
+
+
+def natvis_debug_file(debugger, command, result, internal_dict):
+    command = (command or "").strip()
+    if not command:
+        _debug_write(result, "usage: natvis-debug-file <variable-or-expression> [output-path]")
+        return
+
+    try:
+        args = shlex.split(command)
+    except Exception:
+        args = command.split()
+
+    output_dir = "/tmp" if os.path.isdir("/tmp") else tempfile.gettempdir()
+    output_path = os.path.join(output_dir, "natvis_debug.txt")
+    if len(args) >= 2:
+        expression = args[0]
+        output_path = args[1]
+    else:
+        expression = command
+
+    text = "\\n".join(_natvis_debug_lines(debugger, expression)) + "\\n"
+    try:
+        with open(output_path, "w", encoding="utf-8") as handle:
+            handle.write(text)
+    except Exception as exc:
+        _debug_write(result, "failed to write natvis debug log to {}: {}".format(output_path, exc))
+        return
+    _debug_write(result, "wrote natvis debug log to {}".format(output_path))
 
 
 def _quote_lldb(text):
@@ -1769,6 +1809,7 @@ def _quote_lldb(text):
 def __lldb_init_module(debugger, internal_dict):
     debugger.HandleCommand("type category define " + _quote_lldb(CATEGORY))
     debugger.HandleCommand("command script add -f {}.natvis_debug natvis-debug".format(__name__))
+    debugger.HandleCommand("command script add -f {}.natvis_debug_file natvis-debug-file".format(__name__))
     for spec in FORMATTERS:
         regex = _quote_lldb(spec["regex"])
         if spec.get("display_string") or spec.get("string_view"):
