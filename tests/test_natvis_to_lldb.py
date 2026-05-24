@@ -330,6 +330,155 @@ class NatvisToLldbTests(unittest.TestCase):
                 return False
 
         class FakeResult:
+            def __init__(self, value, type_obj=None):
+                self.value = value
+                self.type_obj = type_obj or FakeType()
+
+            def IsValid(self):
+                return True
+
+            def GetError(self):
+                return FakeError()
+
+            def GetValue(self):
+                return str(self.value)
+
+            def GetSummary(self):
+                return None
+
+            def GetValueAsUnsigned(self):
+                return int(self.value)
+
+            def GetData(self):
+                return self.value
+
+            def GetType(self):
+                return self.type_obj
+
+        class FakeObject:
+            def __init__(self):
+                self.evaluated = []
+                self.member_reads = []
+                self.created_from_data = []
+
+            def IsValid(self):
+                return True
+
+            def GetNonSyntheticValue(self):
+                return self
+
+            def GetID(self):
+                return 1
+
+            def GetTypeName(self):
+                return "demo::SmallVector<int>"
+
+            def GetType(self):
+                return FakeType()
+
+            def GetChildMemberWithName(self, name):
+                self.member_reads.append(name)
+                if name == "size_":
+                    return FakeResult(3)
+                return None
+
+            def EvaluateExpression(self, expr):
+                self.evaluated.append(expr)
+                return FakeResult(3)
+
+            def CreateValueFromData(self, name, data, type_obj):
+                self.created_from_data.append((name, data))
+                return FakeResult(data, type_obj)
+
+            def CreateValueFromExpression(self, name, expr):
+                raise AssertionError("simple children should be copied from member data")
+
+            def Dereference(self):
+                return None
+
+            def GetChildAtIndex(self, index):
+                return None
+
+        class FakePointer:
+            def __init__(self, pointee):
+                self.pointee = pointee
+
+            def IsValid(self):
+                return True
+
+            def GetNonSyntheticValue(self):
+                return self
+
+            def GetID(self):
+                return 2
+
+            def GetTypeName(self):
+                return "demo::SmallVector<int> *"
+
+            def GetType(self):
+                return FakeType(is_pointer=True)
+
+            def Dereference(self):
+                return self.pointee
+
+            def EvaluateExpression(self, expr):
+                raise AssertionError("pointer context should be dereferenced first")
+
+            def CreateValueFromExpression(self, name, expr):
+                raise AssertionError("pointer context should be dereferenced first")
+
+            def GetChildMemberWithName(self, name):
+                return None
+
+            def GetChildAtIndex(self, index):
+                return None
+
+            def CreateValueFromData(self, name, data, type_obj):
+                raise AssertionError("copied child should be created on pointee context")
+
+        pointee = FakeObject()
+        pointer = FakePointer(pointee)
+
+        summary = generated_module.summary_provider(pointer, {})
+        provider = generated_module.NatvisSyntheticProvider(pointer, {})
+        child = provider.get_child_at_index(0)
+
+        self.assertEqual(summary, "size=3")
+        self.assertIsInstance(child, FakeResult)
+        self.assertIn("size_", pointee.member_reads)
+        self.assertIn(("[size]", 3), pointee.created_from_data)
+
+    def test_generated_formatter_falls_back_to_evaluation_for_expressions(self):
+        result = natvis_to_lldb.parse_natvis(ROOT / "examples" / "sample.natvis")
+        generated = natvis_to_lldb.generate_lldb_formatter(
+            result.types,
+            category="test_natvis",
+            source_name="sample.natvis",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "generated.py"
+            path.write_text(generated, encoding="utf-8")
+            generated_spec = importlib.util.spec_from_file_location(
+                "generated_expression_fallback",
+                path,
+            )
+            generated_module = importlib.util.module_from_spec(generated_spec)
+            assert generated_spec.loader is not None
+            generated_spec.loader.exec_module(generated_module)
+
+        class FakeError:
+            def Fail(self):
+                return False
+
+        class FakeType:
+            def IsPointerType(self):
+                return False
+
+            def IsReferenceType(self):
+                return False
+
+        class FakeResult:
             def __init__(self, value):
                 self.value = value
 
@@ -348,6 +497,12 @@ class NatvisToLldbTests(unittest.TestCase):
             def GetValueAsUnsigned(self):
                 return int(self.value)
 
+            def GetData(self):
+                return self.value
+
+            def GetType(self):
+                return FakeType()
+
         class FakeObject:
             def __init__(self):
                 self.evaluated = []
@@ -356,53 +511,41 @@ class NatvisToLldbTests(unittest.TestCase):
             def IsValid(self):
                 return True
 
+            def GetNonSyntheticValue(self):
+                return self
+
+            def GetID(self):
+                return 1
+
             def GetTypeName(self):
                 return "demo::SmallVector<int>"
 
             def GetType(self):
                 return FakeType()
 
+            def GetChildMemberWithName(self, name):
+                return None
+
             def EvaluateExpression(self, expr):
                 self.evaluated.append(expr)
-                return FakeResult(3)
+                return FakeResult(4)
+
+            def CreateValueFromData(self, name, data, type_obj):
+                self.created.append((name, data))
+                return FakeResult(data)
 
             def CreateValueFromExpression(self, name, expr):
-                self.created.append((name, expr))
-                return FakeResult(3)
+                raise AssertionError("evaluated children should be copied from data")
 
-        class FakePointer:
-            def __init__(self, pointee):
-                self.pointee = pointee
+        fake = FakeObject()
 
-            def IsValid(self):
-                return True
-
-            def GetTypeName(self):
-                return "demo::SmallVector<int> *"
-
-            def GetType(self):
-                return FakeType(is_pointer=True)
-
-            def Dereference(self):
-                return self.pointee
-
-            def EvaluateExpression(self, expr):
-                raise AssertionError("pointer context should be dereferenced first")
-
-            def CreateValueFromExpression(self, name, expr):
-                raise AssertionError("pointer context should be dereferenced first")
-
-        pointee = FakeObject()
-        pointer = FakePointer(pointee)
-
-        summary = generated_module.summary_provider(pointer, {})
-        provider = generated_module.NatvisSyntheticProvider(pointer, {})
+        generated_module.FORMATTERS[0]["items"][0]["expression"] = "size_ + 1"
+        provider = generated_module.NatvisSyntheticProvider(fake, {})
         child = provider.get_child_at_index(0)
 
-        self.assertEqual(summary, "size=3")
         self.assertIsInstance(child, FakeResult)
-        self.assertIn("size_", pointee.evaluated)
-        self.assertIn(("[size]", "size_"), pointee.created)
+        self.assertIn("size_ + 1", fake.evaluated)
+        self.assertIn(("[size]", 4), fake.created)
 
     def test_generated_formatter_does_not_raise_when_lldb_calls_fail(self):
         result = natvis_to_lldb.parse_natvis(ROOT / "examples" / "sample.natvis")

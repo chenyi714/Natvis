@@ -494,8 +494,18 @@ def _find_spec(valobj):
     return None
 
 
+def _raw_value(valobj):
+    try:
+        raw = valobj.GetNonSyntheticValue()
+        if raw is not None and raw.IsValid():
+            return raw
+    except Exception:
+        pass
+    return valobj
+
+
 def _expression_context(valobj):
-    context = valobj
+    context = _raw_value(valobj)
     for _ in range(4):
         if context is None:
             return valobj
@@ -517,6 +527,20 @@ def _expression_context(valobj):
     return context
 
 
+def _candidate_contexts(valobj):
+    contexts = []
+    for candidate in (_expression_context(valobj), _raw_value(valobj), valobj):
+        try:
+            if candidate is not None and candidate.IsValid() and all(
+                candidate.GetID() != existing.GetID() for existing in contexts
+            ):
+                contexts.append(candidate)
+        except Exception:
+            if candidate is not None and candidate not in contexts:
+                contexts.append(candidate)
+    return contexts or [valobj]
+
+
 def _value_error(value):
     try:
         if value is None or not value.IsValid():
@@ -530,12 +554,12 @@ def _value_error(value):
 
 
 def _eval_value(valobj, expr):
-    context = _expression_context(valobj)
-    candidates = [context]
-    if context is not valobj:
-        candidates.append(valobj)
+    direct_child = _get_child_by_simple_path(valobj, expr)
+    if direct_child is not None:
+        return direct_child, None
+
     last_error = None
-    for candidate in candidates:
+    for candidate in _candidate_contexts(valobj):
         try:
             value = candidate.EvaluateExpression(expr)
         except Exception as exc:
@@ -548,28 +572,82 @@ def _eval_value(valobj, expr):
     return None, last_error or "invalid value"
 
 
+def _copy_value_with_name(valobj, name, value):
+    if _value_error(value):
+        return None
+    for candidate in _candidate_contexts(valobj):
+        try:
+            copied = candidate.CreateValueFromData(name, value.GetData(), value.GetType())
+        except Exception:
+            continue
+        if not _value_error(copied):
+            return copied
+    return value
+
+
+def _split_simple_path(expr):
+    expr = _strip_natvis_format(expr or "").strip()
+    if expr.startswith("this->"):
+        expr = expr[6:].strip()
+    elif expr.startswith("this."):
+        expr = expr[5:].strip()
+    expr = expr.replace("->", ".")
+    if not re.match(r"^[A-Za-z_]\\w*(?:\\.[A-Za-z_]\\w*|\\[[0-9]+\\])*$", expr):
+        return None
+    parts = []
+    for piece in expr.split("."):
+        match = re.match(r"^([A-Za-z_]\\w*)((?:\\[[0-9]+\\])*)$", piece)
+        if not match:
+            return None
+        parts.append(match.group(1))
+        for index in re.findall(r"\\[([0-9]+)\\]", match.group(2)):
+            parts.append(int(index))
+    return parts
+
+
+def _get_child_by_simple_path(valobj, expr):
+    parts = _split_simple_path(expr)
+    if not parts:
+        return None
+    current = _raw_value(_expression_context(valobj))
+    for part in parts:
+        try:
+            current = _raw_value(current)
+            if isinstance(part, int):
+                current = current.GetChildAtIndex(part)
+            else:
+                child = current.GetChildMemberWithName(part)
+                if not child or not child.IsValid():
+                    maybe_pointer = current.Dereference()
+                    if maybe_pointer is not None and maybe_pointer.IsValid():
+                        child = maybe_pointer.GetChildMemberWithName(part)
+                current = child
+        except Exception:
+            return None
+        if _value_error(current):
+            return None
+    return current
+
+
 def _create_value_from_expression(valobj, name, expr):
-    context = _expression_context(valobj)
-    candidates = [context]
-    if context is not valobj:
-        candidates.append(valobj)
-    last_value = None
-    for candidate in candidates:
+    direct_child = _get_child_by_simple_path(valobj, expr)
+    copied = _copy_value_with_name(valobj, name, direct_child)
+    if copied is not None:
+        return copied
+
+    value, error = _eval_value(valobj, expr)
+    copied = _copy_value_with_name(valobj, name, value)
+    if copied is not None:
+        return copied
+
+    for candidate in _candidate_contexts(valobj):
         try:
-            value = candidate.CreateValueFromExpression(name, expr)
+            fallback = candidate.CreateValueFromExpression(name, "0")
         except Exception:
             continue
-        if not _value_error(value):
-            return value
-        last_value = value
-    for candidate in candidates:
-        try:
-            value = candidate.CreateValueFromExpression(name, "0")
-        except Exception:
-            continue
-        if value is not None:
-            return value
-    return last_value
+        if fallback is not None:
+            return fallback
+    return None
 
 
 def _value_as_int(value):
