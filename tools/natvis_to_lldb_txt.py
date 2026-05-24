@@ -84,9 +84,42 @@ def _unwrap_parenthesized(expression: str) -> str:
     return expression
 
 
+def _strip_c_style_pointer_cast(expression: str) -> str:
+    expression = expression.strip()
+
+    # ((Type*)path)->field  ->  path->field
+    match = re.match(
+        r"^\(\s*\(\s*[^()]+?\*\s*\)\s*(?P<base>[^()]+?)\s*\)\s*(?P<sep>->|\.)\s*(?P<tail>.+)$",
+        expression,
+    )
+    if match:
+        return "{}{}{}".format(
+            match.group("base").strip(),
+            match.group("sep"),
+            match.group("tail").strip(),
+        )
+
+    # (Type*)path->field  ->  path->field
+    match = re.match(r"^\(\s*[^()]+?\*\s*\)\s*(?P<base>.+)$", expression)
+    if match:
+        return match.group("base").strip()
+
+    # (*(Type*)path).field  ->  path->field
+    match = re.match(
+        r"^\(\s*\*\s*\(\s*[^()]+?\*\s*\)\s*(?P<base>[^()]+?)\s*\)\s*\.\s*(?P<tail>.+)$",
+        expression,
+    )
+    if match:
+        return "{}->{}".format(match.group("base").strip(), match.group("tail").strip())
+
+    return expression
+
+
 def _normalize_child_path(expression: str) -> str | None:
     expression = expression.strip()
     dereference = False
+
+    expression = _strip_c_style_pointer_cast(expression)
 
     if expression.startswith("*"):
         dereference = True

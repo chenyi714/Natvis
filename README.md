@@ -42,7 +42,8 @@ python3 tools/natvis_to_lldb_txt.py path/to/project.natvis \
 This summary-only mode does not load Python and does not generate synthetic
 children. It converts simple `DisplayString` / `StringView` rules to LLDB
 summary strings. It supports simple member paths such as `size_`, nested paths
-such as `node_->id`, and pointer dereference paths such as `*count_ptr_`.
+such as `node_->id`, pointer dereference paths such as `*count_ptr_`, and
+best-effort C-style pointer cast paths such as `((Impl*)ptr)->field`.
 
 Load it from CodeLLDB:
 
