@@ -243,7 +243,7 @@ class NatvisToLldbTests(unittest.TestCase):
 
         self.assertEqual(
             summary,
-            "node=${var.node_->id} first=${*var.count_ptr_%d} self=${var.owner_->name}",
+            "node=${var.node_.id} first=${*var.count_ptr_%d} self=${var.owner_.name}",
         )
         self.assertEqual(warnings, [])
 
@@ -255,10 +255,10 @@ class NatvisToLldbTests(unittest.TestCase):
             warnings,
         )
 
-        self.assertEqual(summary, "node=${var.node_->id}")
+        self.assertEqual(summary, "node=${var.node_.id}")
         self.assertEqual(warnings, [])
 
-    def test_txt_summary_generation_strips_c_style_pointer_casts(self):
+    def test_txt_summary_generation_does_not_strip_c_style_pointer_casts_by_default(self):
         warnings = []
         summary = natvis_to_lldb_txt.natvis_display_to_lldb_summary(
             "tag={((entityImpl*)m_impl._Mypair.Myval2)->m_tag}",
@@ -266,18 +266,34 @@ class NatvisToLldbTests(unittest.TestCase):
             warnings,
         )
 
-        self.assertEqual(summary, "tag=${var.m_impl._Mypair.Myval2->m_tag}")
+        self.assertEqual(
+            summary,
+            "tag=<unsupported:((entityImpl*)m_impl._Mypair.Myval2)->m_tag>",
+        )
+        self.assertTrue(any("cannot be represented" in warning for warning in warnings))
+
+    def test_txt_summary_generation_can_assume_c_style_pointer_casts(self):
+        warnings = []
+        summary = natvis_to_lldb_txt.natvis_display_to_lldb_summary(
+            "tag={((entityImpl*)m_impl._Mypair.Myval2)->m_tag}",
+            "demo::CastPath",
+            warnings,
+            assume_c_style_casts=True,
+        )
+
+        self.assertEqual(summary, "tag=${var.m_impl._Mypair.Myval2.m_tag}")
         self.assertEqual(warnings, [])
 
-    def test_txt_summary_generation_strips_dereferenced_c_style_pointer_casts(self):
+    def test_txt_summary_generation_can_assume_dereferenced_c_style_pointer_casts(self):
         warnings = []
         summary = natvis_to_lldb_txt.natvis_display_to_lldb_summary(
             "tag={(*(entityImpl*)m_impl._Mypair.Myval2).m_tag}",
             "demo::CastPath",
             warnings,
+            assume_c_style_casts=True,
         )
 
-        self.assertEqual(summary, "tag=${var.m_impl._Mypair.Myval2->m_tag}")
+        self.assertEqual(summary, "tag=${var.m_impl._Mypair.Myval2.m_tag}")
         self.assertEqual(warnings, [])
 
     def test_generated_formatter_dereferences_pointer_context(self):

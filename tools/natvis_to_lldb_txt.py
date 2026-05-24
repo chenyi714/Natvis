@@ -84,7 +84,7 @@ def _unwrap_parenthesized(expression: str) -> str:
     return expression
 
 
-def _strip_c_style_pointer_cast(expression: str) -> str:
+def _strip_c_style_pointer_cast(expression: str) -> tuple[str, bool]:
     expression = expression.strip()
 
     # ((Type*)path)->field  ->  path->field
@@ -93,16 +93,19 @@ def _strip_c_style_pointer_cast(expression: str) -> str:
         expression,
     )
     if match:
-        return "{}{}{}".format(
-            match.group("base").strip(),
-            match.group("sep"),
-            match.group("tail").strip(),
+        return (
+            "{}{}{}".format(
+                match.group("base").strip(),
+                match.group("sep"),
+                match.group("tail").strip(),
+            ),
+            True,
         )
 
     # (Type*)path->field  ->  path->field
     match = re.match(r"^\(\s*[^()]+?\*\s*\)\s*(?P<base>.+)$", expression)
     if match:
-        return match.group("base").strip()
+        return match.group("base").strip(), True
 
     # (*(Type*)path).field  ->  path->field
     match = re.match(
@@ -110,16 +113,18 @@ def _strip_c_style_pointer_cast(expression: str) -> str:
         expression,
     )
     if match:
-        return "{}->{}".format(match.group("base").strip(), match.group("tail").strip())
+        return "{}->{}".format(match.group("base").strip(), match.group("tail").strip()), True
 
-    return expression
+    return expression, False
 
 
-def _normalize_child_path(expression: str) -> str | None:
+def _normalize_child_path(expression: str, *, assume_c_style_casts: bool = False) -> str | None:
     expression = expression.strip()
     dereference = False
 
-    expression = _strip_c_style_pointer_cast(expression)
+    expression, stripped_cast = _strip_c_style_pointer_cast(expression)
+    if stripped_cast and not assume_c_style_casts:
+        return None
 
     if expression.startswith("*"):
         dereference = True
@@ -142,6 +147,7 @@ def _normalize_child_path(expression: str) -> str | None:
     if not re.match(path_pattern, expression):
         return None
 
+    expression = expression.replace("->", ".")
     return ("*" if dereference else "") + "var." + expression
 
 
@@ -159,9 +165,15 @@ def _format_suffix(fmt: str | None, warnings: list[str], type_name: str, express
     return ""
 
 
-def _convert_expression_token(token: str, type_name: str, warnings: list[str]) -> str:
+def _convert_expression_token(
+    token: str,
+    type_name: str,
+    warnings: list[str],
+    *,
+    assume_c_style_casts: bool = False,
+) -> str:
     expression, fmt = _split_natvis_token(token)
-    child_path = _normalize_child_path(expression)
+    child_path = _normalize_child_path(expression, assume_c_style_casts=assume_c_style_casts)
     if child_path is None:
         warnings.append(
             f"{type_name}: DisplayString expression {expression!r} cannot be represented "
@@ -175,6 +187,8 @@ def natvis_display_to_lldb_summary(
     display_string: str,
     type_name: str,
     warnings: list[str],
+    *,
+    assume_c_style_casts: bool = False,
 ) -> str:
     output: list[str] = []
     i = 0
@@ -198,13 +212,25 @@ def natvis_display_to_lldb_summary(
         if end == -1:
             output.append(_escape_summary_literal(display_string[i:]))
             break
-        output.append(_convert_expression_token(display_string[i + 1 : end], type_name, warnings))
+        output.append(
+            _convert_expression_token(
+                display_string[i + 1 : end],
+                type_name,
+                warnings,
+                assume_c_style_casts=assume_c_style_casts,
+            )
+        )
         i = end + 1
 
     return "".join(output)
 
 
-def _summary_for_type(natvis_type: NatvisType, warnings: list[str]) -> str | None:
+def _summary_for_type(
+    natvis_type: NatvisType,
+    warnings: list[str],
+    *,
+    assume_c_style_casts: bool = False,
+) -> str | None:
     if natvis_type.condition:
         warnings.append(f"{natvis_type.name}: Type Condition is ignored in type-summary mode.")
 
@@ -213,10 +239,14 @@ def _summary_for_type(natvis_type: NatvisType, warnings: list[str]) -> str | Non
             natvis_type.display_string,
             natvis_type.name,
             warnings,
+            assume_c_style_casts=assume_c_style_casts,
         )
 
     if natvis_type.string_view:
-        child_path = _normalize_child_path(natvis_type.string_view)
+        child_path = _normalize_child_path(
+            natvis_type.string_view,
+            assume_c_style_casts=assume_c_style_casts,
+        )
         if child_path is None:
             warnings.append(
                 f"{natvis_type.name}: StringView expression {natvis_type.string_view!r} "
@@ -233,6 +263,7 @@ def generate_lldb_summary_commands(
     *,
     category: str,
     pointer_depth: int,
+    assume_c_style_casts: bool = False,
 ) -> tuple[str, int, list[str]]:
     warnings: list[str] = []
     lines = [
@@ -243,7 +274,11 @@ def generate_lldb_summary_commands(
 
     count = 0
     for natvis_type in types:
-        summary = _summary_for_type(natvis_type, warnings)
+        summary = _summary_for_type(
+            natvis_type,
+            warnings,
+            assume_c_style_casts=assume_c_style_casts,
+        )
         if summary is None:
             warnings.append(f"{natvis_type.name}: no DisplayString/StringView summary generated.")
             continue
@@ -269,12 +304,14 @@ def write_command_file(
     *,
     category: str,
     pointer_depth: int,
+    assume_c_style_casts: bool,
 ) -> tuple[int, list[str]]:
     result = parse_natvis(natvis)
     commands, summary_count, summary_warnings = generate_lldb_summary_commands(
         result.types,
         category=category,
         pointer_depth=pointer_depth,
+        assume_c_style_casts=assume_c_style_casts,
     )
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(commands, encoding="utf-8")
@@ -305,6 +342,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Pointer indirection depth for type summary matching.",
     )
     parser.add_argument(
+        "--assume-c-style-casts",
+        action="store_true",
+        help=(
+            "Strip C-style pointer casts into LLDB expression paths. "
+            "Use only when the uncast path's static type still exposes the requested field."
+        ),
+    )
+    parser.add_argument(
         "--fail-on-warning",
         action="store_true",
         help="Return a non-zero exit code if warnings are found.",
@@ -319,6 +364,7 @@ def main(argv: list[str] | None = None) -> int:
         args.output,
         category=args.category,
         pointer_depth=args.pointer_depth,
+        assume_c_style_casts=args.assume_c_style_casts,
     )
 
     print(f"Generated {args.output} with {summary_count} type summary command(s).")
