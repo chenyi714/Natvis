@@ -338,6 +338,56 @@ class NatvisToLldbTests(unittest.TestCase):
         self.assertIn("size_", pointee.evaluated)
         self.assertIn(("[size]", "size_"), pointee.created)
 
+    def test_generated_formatter_does_not_raise_when_lldb_calls_fail(self):
+        result = natvis_to_lldb.parse_natvis(ROOT / "examples" / "sample.natvis")
+        generated = natvis_to_lldb.generate_lldb_formatter(
+            result.types,
+            category="test_natvis",
+            source_name="sample.natvis",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "generated.py"
+            path.write_text(generated, encoding="utf-8")
+            generated_spec = importlib.util.spec_from_file_location(
+                "generated_no_raise",
+                path,
+            )
+            generated_module = importlib.util.module_from_spec(generated_spec)
+            assert generated_spec.loader is not None
+            generated_spec.loader.exec_module(generated_module)
+
+        class FakeType:
+            def IsPointerType(self):
+                return False
+
+            def IsReferenceType(self):
+                return False
+
+        class BrokenValue:
+            def IsValid(self):
+                return True
+
+            def GetTypeName(self):
+                return "demo::SmallVector<int>"
+
+            def GetType(self):
+                return FakeType()
+
+            def EvaluateExpression(self, expr):
+                raise RuntimeError("simulated lldb expression failure")
+
+            def CreateValueFromExpression(self, name, expr):
+                raise RuntimeError("simulated lldb child failure")
+
+        value = BrokenValue()
+        summary = generated_module.summary_provider(value, {})
+        provider = generated_module.NatvisSyntheticProvider(value, {})
+
+        self.assertIn("simulated lldb expression failure", summary)
+        self.assertGreaterEqual(provider.num_children(), 0)
+        self.assertIsNone(provider.get_child_at_index(0))
+
 
 if __name__ == "__main__":
     unittest.main()

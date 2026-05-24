@@ -483,11 +483,14 @@ def _condition_matches(valobj, condition, context=None):
 
 
 def _find_spec(valobj):
-    type_name = valobj.GetTypeName()
-    cleaned = _clean_type_name(type_name)
-    for regex, spec in _COMPILED:
-        if regex.match(cleaned) and _condition_matches(valobj, spec.get("condition")):
-            return spec
+    try:
+        type_name = valobj.GetTypeName()
+        cleaned = _clean_type_name(type_name)
+        for regex, spec in _COMPILED:
+            if regex.match(cleaned) and _condition_matches(valobj, spec.get("condition")):
+                return spec
+    except Exception:
+        return None
     return None
 
 
@@ -515,11 +518,14 @@ def _expression_context(valobj):
 
 
 def _value_error(value):
-    if value is None or not value.IsValid():
-        return "invalid value"
-    error = value.GetError()
-    if error is not None and error.Fail():
-        return str(error)
+    try:
+        if value is None or not value.IsValid():
+            return "invalid value"
+        error = value.GetError()
+        if error is not None and error.Fail():
+            return str(error)
+    except Exception as exc:
+        return str(exc)
     return None
 
 
@@ -672,15 +678,25 @@ def _render_display(valobj, template, context=None):
 
 
 def summary_provider(valobj, internal_dict, options=None):
-    spec = _find_spec(valobj)
-    if spec is None:
-        return ""
-    if spec.get("display_string"):
-        return _render_display(valobj, spec["display_string"])
-    if spec.get("string_view"):
-        value, error = _eval_value(valobj, spec["string_view"])
-        return "<{}>".format(error) if error else _format_raw_value(value)
+    try:
+        spec = _find_spec(valobj)
+        if spec is None:
+            return ""
+        if spec.get("display_string"):
+            return _render_display(valobj, spec["display_string"])
+        if spec.get("string_view"):
+            value, error = _eval_value(valobj, spec["string_view"])
+            return "<{}>".format(error) if error else _format_raw_value(value)
+    except Exception as exc:
+        return "<formatter error: {}>".format(exc)
     return ""
+
+
+def _safe_expression_child(valobj, name):
+    try:
+        return valobj.CreateValueFromExpression(name, "0")
+    except Exception:
+        return None
 
 
 def _context_arithmetic_result(valobj, expression):
@@ -869,81 +885,107 @@ def _build_custom_list_children(valobj, custom_list):
 class NatvisSyntheticProvider:
     def __init__(self, valobj, internal_dict):
         self.valobj = valobj
-        self.spec = _find_spec(valobj) or {}
+        self.spec = {}
         self.items = []
-        self.array_items = self.spec.get("array_items")
+        self.array_items = None
         self.custom_children = []
         self.array_size = 0
         self.array_pointer = None
-        self.update()
+        try:
+            self.spec = _find_spec(valobj) or {}
+            self.array_items = self.spec.get("array_items")
+            self.update()
+        except Exception:
+            pass
 
     def update(self):
-        self.array_size = 0
-        self.array_pointer = None
-        self.custom_children = []
-        self.items = [
-            item for item in self.spec.get("items") or []
-            if _condition_matches(self.valobj, item.get("condition"))
-        ]
-        if self.array_items and _condition_matches(
-            self.valobj, self.array_items.get("condition")
-        ):
-            size_value, _ = _eval_value(self.valobj, self.array_items["size"])
-            if size_value is not None:
-                self.array_size = int(size_value.GetValueAsUnsigned())
-            self.array_pointer, _ = _eval_value(self.valobj, self.array_items["value_pointer"])
-        for custom_list in self.spec.get("custom_list_items") or []:
-            self.custom_children.extend(_build_custom_list_children(self.valobj, custom_list))
+        try:
+            self.array_size = 0
+            self.array_pointer = None
+            self.custom_children = []
+            self.items = [
+                item for item in self.spec.get("items") or []
+                if _condition_matches(self.valobj, item.get("condition"))
+            ]
+            if self.array_items and _condition_matches(
+                self.valobj, self.array_items.get("condition")
+            ):
+                size_value, _ = _eval_value(self.valobj, self.array_items["size"])
+                if size_value is not None:
+                    self.array_size = int(size_value.GetValueAsUnsigned())
+                self.array_pointer, _ = _eval_value(
+                    self.valobj, self.array_items["value_pointer"]
+                )
+            for custom_list in self.spec.get("custom_list_items") or []:
+                self.custom_children.extend(_build_custom_list_children(self.valobj, custom_list))
+        except Exception:
+            pass
         return False
 
     def has_children(self):
-        return self.num_children() > 0
+        try:
+            return self.num_children() > 0
+        except Exception:
+            return False
 
     def num_children(self):
-        return len(self.items) + self.array_size + len(self.custom_children)
+        try:
+            return len(self.items) + self.array_size + len(self.custom_children)
+        except Exception:
+            return 0
 
     def get_child_index(self, name):
-        for index, item in enumerate(self.items):
-            if item["name"] == name:
-                return index
-        if name.startswith("[") and name.endswith("]"):
-            try:
-                array_index = int(name[1:-1])
-            except ValueError:
-                return -1
-            if 0 <= array_index < self.array_size:
-                return len(self.items) + array_index
-        custom_offset = len(self.items) + self.array_size
-        for index, child in enumerate(self.custom_children):
-            if child["name"] == name:
-                return custom_offset + index
+        try:
+            for index, item in enumerate(self.items):
+                if item["name"] == name:
+                    return index
+            if name.startswith("[") and name.endswith("]"):
+                try:
+                    array_index = int(name[1:-1])
+                except ValueError:
+                    return -1
+                if 0 <= array_index < self.array_size:
+                    return len(self.items) + array_index
+            custom_offset = len(self.items) + self.array_size
+            for index, child in enumerate(self.custom_children):
+                if child["name"] == name:
+                    return custom_offset + index
+        except Exception:
+            return -1
         return -1
 
     def get_child_at_index(self, index):
-        if index < 0 or index >= self.num_children():
-            return None
+        try:
+            if index < 0 or index >= self.num_children():
+                return None
 
-        if index < len(self.items):
-            item = self.items[index]
-            return self._make_expression_child(item["name"], item["expression"])
+            if index < len(self.items):
+                item = self.items[index]
+                return self._make_expression_child(item["name"], item["expression"])
 
-        array_index = index - len(self.items)
-        if array_index < self.array_size:
-            return self._make_array_child(array_index)
+            array_index = index - len(self.items)
+            if array_index < self.array_size:
+                return self._make_array_child(array_index)
 
-        custom_index = array_index - self.array_size
-        child = self.custom_children[custom_index]
-        return self._make_expression_child(child["name"], child["expression"])
+            custom_index = array_index - self.array_size
+            child = self.custom_children[custom_index]
+            return self._make_expression_child(child["name"], child["expression"])
+        except Exception:
+            return _safe_expression_child(self.valobj, "[{}]".format(index))
 
     def _make_expression_child(self, name, expression):
-        rendered_name = _render_display(self.valobj, name) if "{" in name else name
-        expression = _strip_natvis_format(expression)
-        return _create_value_from_expression(self.valobj, rendered_name, expression)
+        try:
+            rendered_name = _render_display(self.valobj, name) if "{" in name else name
+            expression = _strip_natvis_format(expression)
+            value = _create_value_from_expression(self.valobj, rendered_name, expression)
+            return value if value is not None else _safe_expression_child(self.valobj, rendered_name)
+        except Exception:
+            return _safe_expression_child(self.valobj, name)
 
     def _make_array_child(self, array_index):
         name = "[{}]".format(array_index)
-        if self.array_pointer is not None and self.array_pointer.IsValid():
-            try:
+        try:
+            if self.array_pointer is not None and self.array_pointer.IsValid():
                 pointer_type = self.array_pointer.GetType()
                 if pointer_type.IsPointerType():
                     element_type = pointer_type.GetPointeeType()
@@ -951,10 +993,13 @@ class NatvisSyntheticProvider:
                     return self.array_pointer.CreateChildAtOffset(
                         name, array_index * byte_size, element_type
                     )
-            except Exception:
-                pass
-        expr = "({})[{}]".format(self.array_items["value_pointer"], array_index)
-        return self.valobj.CreateValueFromExpression(name, expr)
+        except Exception:
+            pass
+        try:
+            expr = "({})[{}]".format(self.array_items["value_pointer"], array_index)
+            return _create_value_from_expression(self.valobj, name, expr)
+        except Exception:
+            return _safe_expression_child(self.valobj, name)
 
 
 def _quote_lldb(text):
