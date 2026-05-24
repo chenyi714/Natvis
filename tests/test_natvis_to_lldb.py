@@ -770,9 +770,9 @@ class NatvisToLldbTests(unittest.TestCase):
                 "m_impl": FakeValue(
                     "m_impl",
                     children={
-                        "_Mypair": FakeValue(
-                            "_Mypair",
-                            children={"_Myval2": raw_impl_ptr},
+                        "__ptr_": FakeValue(
+                            "__ptr_",
+                            children={"__value_": raw_impl_ptr},
                             target=target,
                         )
                     },

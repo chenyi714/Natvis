@@ -698,6 +698,81 @@ def _child_at_index(value, index):
     return None
 
 
+def _child_by_path(value, path):
+    current = value
+    for name in path:
+        current = _child_member(current, name)
+        if current is None:
+            return None
+    return current
+
+
+_SMART_POINTER_PAYLOAD_PATHS = (
+    ("_Mypair", "_Myval2"),
+    ("_Mypair", "Myval2"),
+    ("_M_t", "_M_t", "_M_head_impl"),
+    ("_M_t", "_M_head_impl"),
+    ("_M_t", "_M_ptr"),
+    ("_M_ptr",),
+    ("__ptr_", "__value_"),
+    ("__ptr_",),
+    ("__value_",),
+)
+
+
+def _smart_pointer_payload(valobj, value, expr=None):
+    if _value_error(value):
+        return None
+
+    try:
+        raw = _raw_value(value)
+        value_type = raw.GetType()
+        if value_type.IsPointerType():
+            return raw
+    except Exception:
+        pass
+
+    for path in _SMART_POINTER_PAYLOAD_PATHS:
+        payload = _child_by_path(value, path)
+        if not _value_error(payload):
+            return payload
+
+    if expr:
+        for suffix in (".get()", ".operator->()"):
+            expression = "({}){}".format(expr, suffix)
+            for candidate in _candidate_contexts(valobj):
+                try:
+                    payload = candidate.EvaluateExpression(expression)
+                except Exception:
+                    continue
+                if not _value_error(payload):
+                    return payload
+    return None
+
+
+def _dereference_or_smart_pointer(valobj, value, expr=None):
+    dereferenced = _dereference_value(value)
+    if dereferenced is not None:
+        return dereferenced
+
+    payload = _smart_pointer_payload(valobj, value, expr)
+    if payload is None:
+        return None
+    return _dereference_value(payload)
+
+
+def _resolve_msvc_smart_pointer_storage(valobj, expr, depth):
+    for suffix in ("._Mypair._Myval2", "._Mypair.Myval2"):
+        if not expr.endswith(suffix):
+            continue
+        base_expr = expr[: -len(suffix)].strip()
+        if not base_expr:
+            return None
+        base_value = _get_value_by_natvis_path(valobj, base_expr, depth + 1)
+        return _smart_pointer_payload(valobj, base_value, base_expr)
+    return None
+
+
 def _apply_access_tail(value, first_operator, tail):
     current = value
     operator = first_operator
@@ -818,7 +893,11 @@ def _get_value_by_natvis_path(valobj, expr, depth=0):
     if expr.startswith("*"):
         inner = _strip_outer_parens(expr[1:].strip())
         value = _get_value_by_natvis_path(valobj, inner, depth + 1)
-        return _dereference_value(value)
+        return _dereference_or_smart_pointer(valobj, value, inner)
+
+    smart_payload = _resolve_msvc_smart_pointer_storage(valobj, expr, depth)
+    if smart_payload is not None:
+        return smart_payload
 
     cast = _split_c_style_pointer_cast(expr)
     if cast is not None:
@@ -1464,12 +1543,232 @@ class NatvisSyntheticProvider:
             return _safe_expression_child(self.valobj, name)
 
 
+def _display_expressions(template):
+    expressions = []
+    if not template:
+        return expressions
+    i = 0
+    while i < len(template):
+        if template.startswith("{{", i) or template.startswith("}}", i):
+            i += 2
+            continue
+        if template[i] != "{":
+            i += 1
+            continue
+        end = template.find("}", i + 1)
+        if end == -1:
+            break
+        expr, _ = _split_display_token(template[i + 1 : end])
+        expressions.append(expr)
+        i = end + 1
+    return expressions
+
+
+def _safe_value_name(value):
+    try:
+        name = value.GetName()
+        if name:
+            return name
+    except Exception:
+        pass
+    return "<unnamed>"
+
+
+def _safe_type_name(value):
+    try:
+        type_name = value.GetTypeName()
+        if type_name:
+            return type_name
+    except Exception:
+        pass
+    try:
+        value_type = value.GetType()
+        type_name = value_type.GetName()
+        if type_name:
+            return type_name
+    except Exception:
+        pass
+    return "<unknown type>"
+
+
+def _safe_value_text(value):
+    try:
+        summary = value.GetSummary()
+        if summary is not None:
+            return summary
+    except Exception:
+        pass
+    try:
+        raw = value.GetValue()
+        if raw is not None:
+            return raw
+    except Exception:
+        pass
+    return "<no value>"
+
+
+def _debug_describe_value(value):
+    if _value_error(value):
+        return "<invalid>"
+    return "{} type={} value={}".format(
+        _safe_value_name(value),
+        _safe_type_name(value),
+        _safe_value_text(value),
+    )
+
+
+def _debug_raw_children(value, lines, limit=24):
+    try:
+        raw = _raw_value(value)
+        count = raw.GetNumChildren()
+    except Exception as exc:
+        lines.append("raw children: unavailable ({})".format(exc))
+        return
+
+    lines.append("raw children: count={}".format(count))
+    for index in range(min(count, limit)):
+        try:
+            child = raw.GetChildAtIndex(index)
+            lines.append(
+                "  [{}] {}".format(index, _debug_describe_value(child))
+            )
+        except Exception as exc:
+            lines.append("  [{}] <error: {}>".format(index, exc))
+    if count > limit:
+        lines.append("  ... {} more child(ren) omitted".format(count - limit))
+
+
+def _debug_eval_expression(valobj, label, expr, lines, context=None):
+    if not expr:
+        return
+    substituted = _substitute_context(expr, context)
+    direct = _get_value_by_natvis_path(valobj, substituted)
+    if direct is not None:
+        lines.append(
+            "OK[path] {}: {} => {}".format(label, substituted, _debug_describe_value(direct))
+        )
+        return
+
+    value, error = _eval_value(valobj, substituted)
+    if error:
+        lines.append("FAIL {}: {} => {}".format(label, substituted, error))
+        return
+    lines.append(
+        "OK[eval] {}: {} => {}".format(label, substituted, _debug_describe_value(value))
+    )
+
+
+def _debug_custom_steps(valobj, steps, lines, context):
+    for step in steps or []:
+        condition = step.get("condition")
+        if condition:
+            _debug_eval_expression(valobj, "custom {} condition".format(step.get("kind")), condition, lines, context)
+        kind = step.get("kind")
+        if kind == "Item":
+            _debug_eval_expression(valobj, "custom Item {}".format(step.get("name") or ""), step.get("expression"), lines, context)
+        elif kind == "Exec":
+            lines.append("INFO custom Exec: {}".format(step.get("expression") or ""))
+        elif kind in ("If", "Loop"):
+            _debug_custom_steps(valobj, step.get("children") or [], lines, context)
+
+
+def _debug_spec_expressions(valobj, spec, lines):
+    if spec.get("condition"):
+        _debug_eval_expression(valobj, "Type condition", spec.get("condition"), lines)
+    for expr in _display_expressions(spec.get("display_string")):
+        _debug_eval_expression(valobj, "DisplayString", expr, lines)
+    if spec.get("string_view"):
+        _debug_eval_expression(valobj, "StringView", spec.get("string_view"), lines)
+
+    for item in spec.get("items") or []:
+        name = item.get("name") or "<unnamed>"
+        if item.get("condition"):
+            _debug_eval_expression(valobj, "Item {} condition".format(name), item.get("condition"), lines)
+        _debug_eval_expression(valobj, "Item {}".format(name), item.get("expression"), lines)
+
+    array_items = spec.get("array_items")
+    if array_items:
+        if array_items.get("condition"):
+            _debug_eval_expression(valobj, "ArrayItems condition", array_items.get("condition"), lines)
+        _debug_eval_expression(valobj, "ArrayItems Size", array_items.get("size"), lines)
+        _debug_eval_expression(valobj, "ArrayItems ValuePointer", array_items.get("value_pointer"), lines)
+
+    for custom_list in spec.get("custom_list_items") or []:
+        context = {}
+        if custom_list.get("condition"):
+            _debug_eval_expression(valobj, "CustomListItems condition", custom_list.get("condition"), lines, context)
+        if custom_list.get("size"):
+            _debug_eval_expression(valobj, "CustomListItems Size", custom_list.get("size"), lines, context)
+        for variable in custom_list.get("variables") or []:
+            name = variable.get("name")
+            initial = variable.get("initial_value")
+            _debug_eval_expression(valobj, "CustomListItems variable {}".format(name), initial, lines, context)
+            if name and initial is not None:
+                context[name] = "({})".format(_substitute_context(initial, context))
+        _debug_custom_steps(valobj, custom_list.get("steps") or [], lines, context)
+
+
+def _debug_find_value(debugger, expression):
+    try:
+        frame = debugger.GetSelectedTarget().GetProcess().GetSelectedThread().GetSelectedFrame()
+    except Exception:
+        return None
+    try:
+        value = frame.FindVariable(expression)
+        if value is not None and value.IsValid():
+            return value
+    except Exception:
+        pass
+    try:
+        value = frame.EvaluateExpression(expression)
+        if value is not None and value.IsValid():
+            return value
+    except Exception:
+        pass
+    return None
+
+
+def _debug_write(result, text):
+    try:
+        result.PutCString(text)
+    except Exception:
+        print(text)
+
+
+def natvis_debug(debugger, command, result, internal_dict):
+    expression = (command or "").strip()
+    if not expression:
+        _debug_write(result, "usage: natvis-debug <variable-or-expression>")
+        return
+
+    lines = ["natvis-debug {}".format(expression)]
+    value = _debug_find_value(debugger, expression)
+    if value is None:
+        lines.append("value not found in the selected frame")
+        _debug_write(result, "\\n".join(lines))
+        return
+
+    lines.append("value: {}".format(_debug_describe_value(value)))
+    _debug_raw_children(value, lines)
+
+    spec = _find_spec(value)
+    if spec is None:
+        lines.append("matched Natvis type: <none>")
+        _debug_write(result, "\\n".join(lines))
+        return
+
+    lines.append("matched Natvis type: {}".format(spec.get("name")))
+    _debug_spec_expressions(value, spec, lines)
+    _debug_write(result, "\\n".join(lines))
+
+
 def _quote_lldb(text):
     return '"' + text.replace("\\\\", "\\\\\\\\").replace('"', '\\\\"') + '"'
 
 
 def __lldb_init_module(debugger, internal_dict):
     debugger.HandleCommand("type category define " + _quote_lldb(CATEGORY))
+    debugger.HandleCommand("command script add -f {}.natvis_debug natvis-debug".format(__name__))
     for spec in FORMATTERS:
         regex = _quote_lldb(spec["regex"])
         if spec.get("display_string") or spec.get("string_view"):

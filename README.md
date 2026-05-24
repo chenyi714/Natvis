@@ -20,6 +20,9 @@ quickly, then leave the truly complex types as explicit follow-up work.
 - Common C-style pointer-cast member paths in the generated Python formatter,
   such as `((Impl*)m_impl._Mypair._Myval2)->m_id` and
   `*(((Impl*)ptr)->field)`
+- MSVC smart-pointer storage paths such as `m_impl._Mypair._Myval2` are mapped
+  to common LLDB-visible `std::unique_ptr` / `std::shared_ptr` payload layouts
+  or `.get()` where possible.
 
 The converter warns on advanced nodes such as `IndexListItems`,
 `LinkedListItems`, and `TreeItems`. Those usually need a
@@ -75,6 +78,20 @@ Or load the generated command file:
   ]
 }
 ```
+
+## Debugging a Formatter
+
+The generated Python module registers a helper command:
+
+```lldb
+natvis-debug body
+```
+
+Run it while stopped at a breakpoint, replacing `body` with the variable or
+expression you are inspecting. The output shows the matched Natvis type, the raw
+LLDB children, and whether each `DisplayString`, `Item`, `Condition`, and
+`CustomListItems` expression was resolved through the safer SBValue path parser
+or had to fall back to LLDB expression evaluation.
 
 ## Example
 
