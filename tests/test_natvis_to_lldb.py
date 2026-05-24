@@ -68,6 +68,30 @@ class NatvisToLldbTests(unittest.TestCase):
         self.assertEqual(result.types, [])
         self.assertTrue(any("LinkedListItems" in item for item in result.warnings))
 
+    def test_xml_comments_are_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "comments.natvis"
+            path.write_text(
+                """<?xml version="1.0" encoding="utf-8"?>
+<AutoVisualizer xmlns="http://schemas.microsoft.com/vstudio/debugger/natvis/2010">
+  <!-- top-level comment -->
+  <Type Name="demo::WithComments">
+    <DisplayString>value={value_}</DisplayString>
+    <Expand>
+      <!-- comments inside Expand used to crash _local_name(child.tag) -->
+      <Item Name="[value]">value_</Item>
+    </Expand>
+  </Type>
+</AutoVisualizer>
+""",
+                encoding="utf-8",
+            )
+            result = natvis_to_lldb.parse_natvis(path)
+
+        self.assertEqual(result.warnings, [])
+        self.assertEqual(len(result.types), 1)
+        self.assertEqual(result.types[0].items[0].expression, "value_")
+
 
 if __name__ == "__main__":
     unittest.main()

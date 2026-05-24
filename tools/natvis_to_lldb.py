@@ -67,7 +67,9 @@ class ParseResult:
     warnings: list[str]
 
 
-def _local_name(tag: str) -> str:
+def _local_name(tag: object) -> str | None:
+    if not isinstance(tag, str):
+        return None
     return tag.rsplit("}", 1)[-1]
 
 
@@ -80,7 +82,10 @@ def _text(element: ET.Element | None) -> str | None:
 
 def _children(element: ET.Element, local_name: str | None = None) -> Iterable[ET.Element]:
     for child in list(element):
-        if local_name is None or _local_name(child.tag) == local_name:
+        child_name = _local_name(child.tag)
+        if child_name is None:
+            continue
+        if local_name is None or child_name == local_name:
             yield child
 
 
