@@ -32,12 +32,16 @@ python3 tools/natvis_to_lldb.py path/to/project.natvis \
   -o tools/debugvis/project_lldb_formatters.py
 ```
 
-Generate an `lldb_formatters.txt` command file plus its companion Python module:
+Generate a pure `lldb_formatters.txt` command file using `type summary add`:
 
 ```sh
 python3 tools/natvis_to_lldb_txt.py path/to/project.natvis \
   -o tools/debugvis/lldb_formatters.txt
 ```
+
+This summary-only mode does not load Python and does not generate synthetic
+children. It converts simple `DisplayString` / `StringView` rules to LLDB
+summary strings.
 
 Load it from CodeLLDB:
 

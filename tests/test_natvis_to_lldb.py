@@ -205,30 +205,33 @@ class NatvisToLldbTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             command_file = tmp_path / "lldb_formatters.txt"
-            python_file = tmp_path / "lldb_formatters.py"
 
             exit_code = natvis_to_lldb_txt.main(
                 [
                     str(ROOT / "examples" / "sample.natvis"),
                     "-o",
                     str(command_file),
-                    "--python-output",
-                    str(python_file),
                 ]
             )
 
             self.assertEqual(exit_code, 0)
             self.assertTrue(command_file.exists())
-            self.assertTrue(python_file.exists())
-            self.assertIn(
-                "command script import",
-                command_file.read_text(encoding="utf-8"),
-            )
-            self.assertIn(
-                str(python_file.resolve()),
-                command_file.read_text(encoding="utf-8"),
-            )
-            py_compile.compile(str(python_file), doraise=True)
+            contents = command_file.read_text(encoding="utf-8")
+            self.assertIn("type category define", contents)
+            self.assertIn("type summary add", contents)
+            self.assertIn('--summary-string "size=${var.size_}"', contents)
+            self.assertNotIn("command script import", contents)
+
+    def test_txt_summary_generation_warns_on_complex_expressions(self):
+        warnings = []
+        summary = natvis_to_lldb_txt.natvis_display_to_lldb_summary(
+            "size={size_} ptr={data_ + 1}",
+            "demo::Complex",
+            warnings,
+        )
+
+        self.assertEqual(summary, "size=${var.size_} ptr=<unsupported:data_ + 1>")
+        self.assertTrue(any("cannot be represented" in warning for warning in warnings))
 
     def test_generated_formatter_dereferences_pointer_context(self):
         result = natvis_to_lldb.parse_natvis(ROOT / "examples" / "sample.natvis")
