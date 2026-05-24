@@ -131,6 +131,23 @@ By default this writes `/tmp/natvis_debug.txt`. You can choose another path with
 natvis-debug-file body /tmp/body_natvis_debug.txt
 ```
 
+For large Natvis files, the most useful first pass is usually the unresolved
+summary:
+
+```lldb
+natvis-debug-file --unresolved-only body /tmp/natvis_debug.txt
+```
+
+`expression evaluation disabled` means the generated formatter intentionally did
+not call LLDB's C++ expression evaluator for that expression. If you are using a
+`--commands-only` diagnostic module and want to check whether LLDB itself can
+evaluate those expressions, run the diagnostic command with `--eval`. This only
+affects that one command:
+
+```lldb
+natvis-debug-file --eval --unresolved-only body /tmp/natvis_debug_eval.txt
+```
+
 ## Example
 
 ```sh

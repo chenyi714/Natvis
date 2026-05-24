@@ -433,6 +433,11 @@ ENABLE_EXPRESSION_EVAL = __ENABLE_EXPRESSION_EVAL__
 ENABLE_SUMMARIES = __ENABLE_SUMMARIES__
 ENABLE_SYNTHETIC_CHILDREN = __ENABLE_SYNTHETIC_CHILDREN__
 _COMPILED = [(re.compile(spec["regex"]), spec) for spec in FORMATTERS]
+_FORCE_EXPRESSION_EVAL = [False]
+
+
+def _expression_eval_enabled():
+    return ENABLE_EXPRESSION_EVAL or _FORCE_EXPRESSION_EVAL[0]
 
 
 def _clean_type_name(type_name):
@@ -751,7 +756,7 @@ def _smart_pointer_payload(valobj, value, expr=None):
         if not _value_error(payload):
             return payload
 
-    if expr and ENABLE_EXPRESSION_EVAL:
+    if expr and _expression_eval_enabled():
         for suffix in (".get()", ".operator->()"):
             expression = "({}){}".format(expr, suffix)
             for candidate in _candidate_contexts(valobj):
@@ -942,7 +947,7 @@ def _eval_value(valobj, expr):
     if direct_child is not None:
         return direct_child, None
 
-    if not ENABLE_EXPRESSION_EVAL:
+    if not _expression_eval_enabled():
         return None, "expression evaluation disabled"
 
     last_error = None
@@ -1655,74 +1660,145 @@ def _debug_raw_children(value, lines, limit=24):
         lines.append("  ... {} more child(ren) omitted".format(count - limit))
 
 
-def _debug_eval_expression(valobj, label, expr, lines, context=None):
+def _debug_record_unresolved(state, label, expr, error):
+    if state is not None:
+        state.setdefault("unresolved", []).append((label, expr, error))
+
+
+def _debug_append(lines, state, text, *, ok=False):
+    if state is not None and state.get("unresolved_only") and ok:
+        return
+    lines.append(text)
+
+
+def _debug_eval_expression(valobj, label, expr, lines, context=None, state=None):
     if not expr:
         return
     substituted = _substitute_context(expr, context)
     direct = _get_value_by_natvis_path(valobj, substituted)
     if direct is not None:
-        lines.append(
-            "OK[path] {}: {} => {}".format(label, substituted, _debug_describe_value(direct))
+        _debug_append(
+            lines,
+            state,
+            "OK[path] {}: {} => {}".format(label, substituted, _debug_describe_value(direct)),
+            ok=True,
         )
         return
 
     value, error = _eval_value(valobj, substituted)
     if error:
+        _debug_record_unresolved(state, label, substituted, error)
         lines.append("FAIL {}: {} => {}".format(label, substituted, error))
         return
-    lines.append(
-        "OK[eval] {}: {} => {}".format(label, substituted, _debug_describe_value(value))
+    _debug_append(
+        lines,
+        state,
+        "OK[eval] {}: {} => {}".format(label, substituted, _debug_describe_value(value)),
+        ok=True,
     )
 
 
-def _debug_custom_steps(valobj, steps, lines, context):
+def _debug_custom_steps(valobj, steps, lines, context, state):
     for step in steps or []:
         condition = step.get("condition")
         if condition:
-            _debug_eval_expression(valobj, "custom {} condition".format(step.get("kind")), condition, lines, context)
+            _debug_eval_expression(
+                valobj,
+                "custom {} condition".format(step.get("kind")),
+                condition,
+                lines,
+                context,
+                state,
+            )
         kind = step.get("kind")
         if kind == "Item":
-            _debug_eval_expression(valobj, "custom Item {}".format(step.get("name") or ""), step.get("expression"), lines, context)
+            _debug_eval_expression(
+                valobj,
+                "custom Item {}".format(step.get("name") or ""),
+                step.get("expression"),
+                lines,
+                context,
+                state,
+            )
         elif kind == "Exec":
             lines.append("INFO custom Exec: {}".format(step.get("expression") or ""))
         elif kind in ("If", "Loop"):
-            _debug_custom_steps(valobj, step.get("children") or [], lines, context)
+            _debug_custom_steps(valobj, step.get("children") or [], lines, context, state)
 
 
-def _debug_spec_expressions(valobj, spec, lines):
+def _debug_spec_expressions(valobj, spec, lines, state):
     if spec.get("condition"):
-        _debug_eval_expression(valobj, "Type condition", spec.get("condition"), lines)
+        _debug_eval_expression(valobj, "Type condition", spec.get("condition"), lines, state=state)
     for expr in _display_expressions(spec.get("display_string")):
-        _debug_eval_expression(valobj, "DisplayString", expr, lines)
+        _debug_eval_expression(valobj, "DisplayString", expr, lines, state=state)
     if spec.get("string_view"):
-        _debug_eval_expression(valobj, "StringView", spec.get("string_view"), lines)
+        _debug_eval_expression(valobj, "StringView", spec.get("string_view"), lines, state=state)
 
     for item in spec.get("items") or []:
         name = item.get("name") or "<unnamed>"
         if item.get("condition"):
-            _debug_eval_expression(valobj, "Item {} condition".format(name), item.get("condition"), lines)
-        _debug_eval_expression(valobj, "Item {}".format(name), item.get("expression"), lines)
+            _debug_eval_expression(
+                valobj,
+                "Item {} condition".format(name),
+                item.get("condition"),
+                lines,
+                state=state,
+            )
+        _debug_eval_expression(valobj, "Item {}".format(name), item.get("expression"), lines, state=state)
 
     array_items = spec.get("array_items")
     if array_items:
         if array_items.get("condition"):
-            _debug_eval_expression(valobj, "ArrayItems condition", array_items.get("condition"), lines)
-        _debug_eval_expression(valobj, "ArrayItems Size", array_items.get("size"), lines)
-        _debug_eval_expression(valobj, "ArrayItems ValuePointer", array_items.get("value_pointer"), lines)
+            _debug_eval_expression(
+                valobj,
+                "ArrayItems condition",
+                array_items.get("condition"),
+                lines,
+                state=state,
+            )
+        _debug_eval_expression(valobj, "ArrayItems Size", array_items.get("size"), lines, state=state)
+        _debug_eval_expression(
+            valobj,
+            "ArrayItems ValuePointer",
+            array_items.get("value_pointer"),
+            lines,
+            state=state,
+        )
 
     for custom_list in spec.get("custom_list_items") or []:
         context = {}
         if custom_list.get("condition"):
-            _debug_eval_expression(valobj, "CustomListItems condition", custom_list.get("condition"), lines, context)
+            _debug_eval_expression(
+                valobj,
+                "CustomListItems condition",
+                custom_list.get("condition"),
+                lines,
+                context,
+                state,
+            )
         if custom_list.get("size"):
-            _debug_eval_expression(valobj, "CustomListItems Size", custom_list.get("size"), lines, context)
+            _debug_eval_expression(
+                valobj,
+                "CustomListItems Size",
+                custom_list.get("size"),
+                lines,
+                context,
+                state,
+            )
         for variable in custom_list.get("variables") or []:
             name = variable.get("name")
             initial = variable.get("initial_value")
-            _debug_eval_expression(valobj, "CustomListItems variable {}".format(name), initial, lines, context)
+            _debug_eval_expression(
+                valobj,
+                "CustomListItems variable {}".format(name),
+                initial,
+                lines,
+                context,
+                state,
+            )
             if name and initial is not None:
                 context[name] = "({})".format(_substitute_context(initial, context))
-        _debug_custom_steps(valobj, custom_list.get("steps") or [], lines, context)
+        _debug_custom_steps(valobj, custom_list.get("steps") or [], lines, context, state)
 
 
 def _debug_find_value(debugger, expression):
@@ -1759,54 +1835,154 @@ def _debug_write(result, text):
             raise
 
 
-def _natvis_debug_lines(debugger, expression):
+def _debug_append_unresolved_summary(lines, state):
+    unresolved = state.get("unresolved") or []
+    lines.append("")
+    lines.append("unresolved expressions: {}".format(len(unresolved)))
+    if not unresolved:
+        return
+
+    by_expression = {}
+    for label, expr, error in unresolved:
+        item = by_expression.setdefault(expr, {"count": 0, "labels": [], "error": error})
+        item["count"] += 1
+        if len(item["labels"]) < 3 and label not in item["labels"]:
+            item["labels"].append(label)
+
+    sorted_items = sorted(
+        by_expression.items(),
+        key=lambda item: (-item[1]["count"], item[0]),
+    )
+    for index, (expr, item) in enumerate(sorted_items[:50], 1):
+        lines.append(
+            "  {}. x{} [{}] {} => {}".format(
+                index,
+                item["count"],
+                "; ".join(item["labels"]),
+                expr,
+                item["error"],
+            )
+        )
+    if len(sorted_items) > 50:
+        lines.append("  ... {} more unique expression(s) omitted".format(len(sorted_items) - 50))
+
+
+def _natvis_debug_lines(debugger, expression, *, allow_eval=False, unresolved_only=False):
     expression = (expression or "").strip()
     if not expression:
         return ["usage: natvis-debug <variable-or-expression>"]
 
-    lines = ["natvis-debug {}".format(expression)]
-    value = _debug_find_value(debugger, expression)
-    if value is None:
-        lines.append("value not found in the selected frame")
+    previous_force_eval = _FORCE_EXPRESSION_EVAL[0]
+    _FORCE_EXPRESSION_EVAL[0] = bool(allow_eval)
+    try:
+        lines = ["natvis-debug {}".format(expression)]
+        lines.append("expression eval: {}".format("enabled for this command" if _expression_eval_enabled() else "disabled"))
+        if unresolved_only:
+            lines.append("mode: unresolved-only")
+        state = {"unresolved": [], "unresolved_only": unresolved_only}
+
+        value = _debug_find_value(debugger, expression)
+        if value is None:
+            lines.append("value not found in the selected frame")
+            return lines
+
+        lines.append("value: {}".format(_debug_describe_value(value)))
+        if not unresolved_only:
+            _debug_raw_children(value, lines)
+
+        spec = _find_spec(value)
+        if spec is None:
+            lines.append("matched Natvis type: <none>")
+            return lines
+
+        lines.append("matched Natvis type: {}".format(spec.get("name")))
+        _debug_spec_expressions(value, spec, lines, state)
+        _debug_append_unresolved_summary(lines, state)
         return lines
-
-    lines.append("value: {}".format(_debug_describe_value(value)))
-    _debug_raw_children(value, lines)
-
-    spec = _find_spec(value)
-    if spec is None:
-        lines.append("matched Natvis type: <none>")
-        return lines
-
-    lines.append("matched Natvis type: {}".format(spec.get("name")))
-    _debug_spec_expressions(value, spec, lines)
-    return lines
+    finally:
+        _FORCE_EXPRESSION_EVAL[0] = previous_force_eval
 
 
-def natvis_debug(debugger, command, result, internal_dict):
-    _debug_write(result, "\\n".join(_natvis_debug_lines(debugger, command)))
-
-
-def natvis_debug_file(debugger, command, result, internal_dict):
+def _parse_debug_command(command, *, file_mode=False):
     command = (command or "").strip()
     if not command:
-        _debug_write(result, "usage: natvis-debug-file <variable-or-expression> [output-path]")
-        return
+        return None, None, {}
 
     try:
         args = shlex.split(command)
     except Exception:
         args = command.split()
 
-    output_dir = "/tmp" if os.path.isdir("/tmp") else tempfile.gettempdir()
-    output_path = os.path.join(output_dir, "natvis_debug.txt")
-    if len(args) >= 2:
-        expression = args[0]
-        output_path = args[1]
-    else:
-        expression = command
+    options = {"allow_eval": False, "unresolved_only": False}
+    while args and args[0].startswith("--"):
+        option = args.pop(0)
+        if option == "--eval":
+            options["allow_eval"] = True
+        elif option in ("--unresolved-only", "--failures-only"):
+            options["unresolved_only"] = True
+        else:
+            options.setdefault("unknown", []).append(option)
 
-    text = "\\n".join(_natvis_debug_lines(debugger, expression)) + "\\n"
+    if not args:
+        return None, None, options
+
+    output_path = None
+    if file_mode and len(args) >= 2:
+        output_path = args[-1]
+        expression = " ".join(args[:-1])
+    else:
+        expression = " ".join(args)
+    return expression, output_path, options
+
+
+def natvis_debug(debugger, command, result, internal_dict):
+    expression, _, options = _parse_debug_command(command, file_mode=False)
+    if not expression:
+        _debug_write(
+            result,
+            "usage: natvis-debug [--unresolved-only] [--eval] <variable-or-expression>",
+        )
+        return
+    for option in options.get("unknown", []):
+        _debug_write(result, "unknown option: {}".format(option))
+        return
+    _debug_write(
+        result,
+        "\\n".join(
+            _natvis_debug_lines(
+                debugger,
+                expression,
+                allow_eval=options["allow_eval"],
+                unresolved_only=options["unresolved_only"],
+            )
+        ),
+    )
+
+
+def natvis_debug_file(debugger, command, result, internal_dict):
+    expression, output_path, options = _parse_debug_command(command, file_mode=True)
+    if not expression:
+        _debug_write(
+            result,
+            "usage: natvis-debug-file [--unresolved-only] [--eval] <variable-or-expression> [output-path]",
+        )
+        return
+    for option in options.get("unknown", []):
+        _debug_write(result, "unknown option: {}".format(option))
+        return
+
+    output_dir = "/tmp" if os.path.isdir("/tmp") else tempfile.gettempdir()
+    if output_path is None:
+        output_path = os.path.join(output_dir, "natvis_debug.txt")
+
+    text = "\\n".join(
+        _natvis_debug_lines(
+            debugger,
+            expression,
+            allow_eval=options["allow_eval"],
+            unresolved_only=options["unresolved_only"],
+        )
+    ) + "\\n"
     try:
         with open(output_path, "w", encoding="utf-8") as handle:
             handle.write(text)
