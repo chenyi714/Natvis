@@ -43,6 +43,7 @@ class NatvisToLldbTests(unittest.TestCase):
             result.types,
             category="test_natvis",
             source_name="sample.natvis",
+            enable_expression_eval=True,
         )
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -302,6 +303,7 @@ class NatvisToLldbTests(unittest.TestCase):
             result.types,
             category="test_natvis",
             source_name="sample.natvis",
+            enable_expression_eval=True,
         )
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -460,6 +462,7 @@ class NatvisToLldbTests(unittest.TestCase):
             result.types,
             category="test_natvis",
             source_name="sample.natvis",
+            enable_expression_eval=True,
         )
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -799,6 +802,7 @@ class NatvisToLldbTests(unittest.TestCase):
             result.types,
             category="test_natvis",
             source_name="sample.natvis",
+            enable_expression_eval=True,
         )
 
         with tempfile.TemporaryDirectory() as tmp:

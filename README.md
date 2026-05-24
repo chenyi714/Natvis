@@ -38,6 +38,31 @@ python3 tools/natvis_to_lldb.py path/to/project.natvis \
   -o tools/debugvis/project_lldb_formatters.py
 ```
 
+By default, the generated Python formatter avoids `SBValue.EvaluateExpression`
+while variables render. This is safer for CodeLLDB because expression
+evaluation from a formatter can freeze stepping or continuing when the Variables
+view refreshes. If you explicitly want that fallback for expressions the path
+parser cannot resolve, add `--enable-expression-eval`.
+
+If the full synthetic provider makes a large project unstable, generate a
+summary-only Python module:
+
+```sh
+python3 tools/natvis_to_lldb.py path/to/project.natvis \
+  -o tools/debugvis/project_lldb_formatters.py \
+  --no-synthetic
+```
+
+If CodeLLDB freezes as soon as a breakpoint is hit, generate a diagnostics-only
+module. It registers `natvis-debug` / `natvis-debug-file` but no summaries or
+synthetic children:
+
+```sh
+python3 tools/natvis_to_lldb.py path/to/project.natvis \
+  -o tools/debugvis/project_lldb_formatters.py \
+  --commands-only
+```
+
 Generate a pure `lldb_formatters.txt` command file using `type summary add`:
 
 ```sh
