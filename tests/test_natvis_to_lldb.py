@@ -230,6 +230,114 @@ class NatvisToLldbTests(unittest.TestCase):
             )
             py_compile.compile(str(python_file), doraise=True)
 
+    def test_generated_formatter_dereferences_pointer_context(self):
+        result = natvis_to_lldb.parse_natvis(ROOT / "examples" / "sample.natvis")
+        generated = natvis_to_lldb.generate_lldb_formatter(
+            result.types,
+            category="test_natvis",
+            source_name="sample.natvis",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "generated.py"
+            path.write_text(generated, encoding="utf-8")
+            generated_spec = importlib.util.spec_from_file_location(
+                "generated_pointer_context",
+                path,
+            )
+            generated_module = importlib.util.module_from_spec(generated_spec)
+            assert generated_spec.loader is not None
+            generated_spec.loader.exec_module(generated_module)
+
+        class FakeError:
+            def Fail(self):
+                return False
+
+        class FakeType:
+            def __init__(self, is_pointer=False):
+                self.is_pointer = is_pointer
+
+            def IsPointerType(self):
+                return self.is_pointer
+
+            def IsReferenceType(self):
+                return False
+
+        class FakeResult:
+            def __init__(self, value):
+                self.value = value
+
+            def IsValid(self):
+                return True
+
+            def GetError(self):
+                return FakeError()
+
+            def GetValue(self):
+                return str(self.value)
+
+            def GetSummary(self):
+                return None
+
+            def GetValueAsUnsigned(self):
+                return int(self.value)
+
+        class FakeObject:
+            def __init__(self):
+                self.evaluated = []
+                self.created = []
+
+            def IsValid(self):
+                return True
+
+            def GetTypeName(self):
+                return "demo::SmallVector<int>"
+
+            def GetType(self):
+                return FakeType()
+
+            def EvaluateExpression(self, expr):
+                self.evaluated.append(expr)
+                return FakeResult(3)
+
+            def CreateValueFromExpression(self, name, expr):
+                self.created.append((name, expr))
+                return FakeResult(3)
+
+        class FakePointer:
+            def __init__(self, pointee):
+                self.pointee = pointee
+
+            def IsValid(self):
+                return True
+
+            def GetTypeName(self):
+                return "demo::SmallVector<int> *"
+
+            def GetType(self):
+                return FakeType(is_pointer=True)
+
+            def Dereference(self):
+                return self.pointee
+
+            def EvaluateExpression(self, expr):
+                raise AssertionError("pointer context should be dereferenced first")
+
+            def CreateValueFromExpression(self, name, expr):
+                raise AssertionError("pointer context should be dereferenced first")
+
+        pointee = FakeObject()
+        pointer = FakePointer(pointee)
+
+        summary = generated_module.summary_provider(pointer, {})
+        provider = generated_module.NatvisSyntheticProvider(pointer, {})
+        child = provider.get_child_at_index(0)
+
+        self.assertEqual(summary, "size=3")
+        self.assertIsInstance(child, FakeResult)
+        self.assertIn("size_", pointee.evaluated)
+        self.assertIn(("[size]", "size_"), pointee.created)
+
 
 if __name__ == "__main__":
     unittest.main()

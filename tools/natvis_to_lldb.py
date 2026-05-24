@@ -491,6 +491,29 @@ def _find_spec(valobj):
     return None
 
 
+def _expression_context(valobj):
+    context = valobj
+    for _ in range(4):
+        if context is None:
+            return valobj
+        try:
+            if not context.IsValid():
+                return valobj
+        except Exception:
+            return valobj
+        try:
+            value_type = context.GetType()
+            if value_type.IsPointerType() or value_type.IsReferenceType():
+                dereferenced = context.Dereference()
+                if dereferenced is not None and dereferenced.IsValid():
+                    context = dereferenced
+                    continue
+        except Exception:
+            pass
+        return context
+    return context
+
+
 def _value_error(value):
     if value is None or not value.IsValid():
         return "invalid value"
@@ -501,14 +524,46 @@ def _value_error(value):
 
 
 def _eval_value(valobj, expr):
-    try:
-        value = valobj.EvaluateExpression(expr)
-    except Exception as exc:
-        return None, str(exc)
-    error = _value_error(value)
-    if error:
-        return None, error
-    return value, None
+    context = _expression_context(valobj)
+    candidates = [context]
+    if context is not valobj:
+        candidates.append(valobj)
+    last_error = None
+    for candidate in candidates:
+        try:
+            value = candidate.EvaluateExpression(expr)
+        except Exception as exc:
+            last_error = str(exc)
+            continue
+        error = _value_error(value)
+        if not error:
+            return value, None
+        last_error = error
+    return None, last_error or "invalid value"
+
+
+def _create_value_from_expression(valobj, name, expr):
+    context = _expression_context(valobj)
+    candidates = [context]
+    if context is not valobj:
+        candidates.append(valobj)
+    last_value = None
+    for candidate in candidates:
+        try:
+            value = candidate.CreateValueFromExpression(name, expr)
+        except Exception:
+            continue
+        if not _value_error(value):
+            return value
+        last_value = value
+    for candidate in candidates:
+        try:
+            value = candidate.CreateValueFromExpression(name, "0")
+        except Exception:
+            continue
+        if value is not None:
+            return value
+    return last_value
 
 
 def _value_as_int(value):
@@ -883,10 +938,7 @@ class NatvisSyntheticProvider:
     def _make_expression_child(self, name, expression):
         rendered_name = _render_display(self.valobj, name) if "{" in name else name
         expression = _strip_natvis_format(expression)
-        try:
-            return self.valobj.CreateValueFromExpression(rendered_name, expression)
-        except Exception:
-            return self.valobj.CreateValueFromExpression(rendered_name, "0")
+        return _create_value_from_expression(self.valobj, rendered_name, expression)
 
     def _make_array_child(self, array_index):
         name = "[{}]".format(array_index)
