@@ -8,12 +8,18 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOL = ROOT / "tools" / "natvis_to_lldb.py"
+TOOL_TXT = ROOT / "tools" / "natvis_to_lldb_txt.py"
 
 spec = importlib.util.spec_from_file_location("natvis_to_lldb", TOOL)
 natvis_to_lldb = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
 sys.modules["natvis_to_lldb"] = natvis_to_lldb
 spec.loader.exec_module(natvis_to_lldb)
+
+txt_spec = importlib.util.spec_from_file_location("natvis_to_lldb_txt", TOOL_TXT)
+natvis_to_lldb_txt = importlib.util.module_from_spec(txt_spec)
+assert txt_spec.loader is not None
+txt_spec.loader.exec_module(natvis_to_lldb_txt)
 
 
 class NatvisToLldbTests(unittest.TestCase):
@@ -194,6 +200,35 @@ class NatvisToLldbTests(unittest.TestCase):
             generated_path = Path(tmp) / "generated.py"
             generated_path.write_text(generated, encoding="utf-8")
             py_compile.compile(str(generated_path), doraise=True)
+
+    def test_txt_entrypoint_generation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            command_file = tmp_path / "lldb_formatters.txt"
+            python_file = tmp_path / "lldb_formatters.py"
+
+            exit_code = natvis_to_lldb_txt.main(
+                [
+                    str(ROOT / "examples" / "sample.natvis"),
+                    "-o",
+                    str(command_file),
+                    "--python-output",
+                    str(python_file),
+                ]
+            )
+
+            self.assertEqual(exit_code, 0)
+            self.assertTrue(command_file.exists())
+            self.assertTrue(python_file.exists())
+            self.assertIn(
+                "command script import",
+                command_file.read_text(encoding="utf-8"),
+            )
+            self.assertIn(
+                str(python_file.resolve()),
+                command_file.read_text(encoding="utf-8"),
+            )
+            py_compile.compile(str(python_file), doraise=True)
 
 
 if __name__ == "__main__":
