@@ -17,6 +17,9 @@ quickly, then leave the truly complex types as explicit follow-up work.
   `Break`, `Exec`, and `Item`
 - `Condition` on `Type`, `Item`, `ArrayItems`, and CustomListItems steps
 - `AlternativeType`
+- Common C-style pointer-cast member paths in the generated Python formatter,
+  such as `((Impl*)m_impl._Mypair._Myval2)->m_id` and
+  `*(((Impl*)ptr)->field)`
 
 The converter warns on advanced nodes such as `IndexListItems`,
 `LinkedListItems`, and `TreeItems`. Those usually need a

@@ -364,6 +364,9 @@ class NatvisToLldbTests(unittest.TestCase):
             def IsValid(self):
                 return True
 
+            def GetError(self):
+                return FakeError()
+
             def GetNonSyntheticValue(self):
                 return self
 
@@ -405,6 +408,9 @@ class NatvisToLldbTests(unittest.TestCase):
 
             def IsValid(self):
                 return True
+
+            def GetError(self):
+                return FakeError()
 
             def GetNonSyntheticValue(self):
                 return self
@@ -546,6 +552,246 @@ class NatvisToLldbTests(unittest.TestCase):
         self.assertIsInstance(child, FakeResult)
         self.assertIn("size_ + 1", fake.evaluated)
         self.assertIn(("[size]", 4), fake.created)
+
+    def test_generated_formatter_resolves_c_style_cast_member_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            natvis_path = Path(tmp) / "pa_body.natvis"
+            natvis_path.write_text(
+                """<?xml version="1.0" encoding="utf-8"?>
+<AutoVisualizer xmlns="http://schemas.microsoft.com/vstudio/debugger/natvis/2010">
+  <Type Name="PaBody">
+    <DisplayString>tag={((PaBodyImpl*)m_impl._Mypair._Myval2)->m_tag}</DisplayString>
+    <Expand>
+      <Item Name="m_context">((PaBodyImpl*)m_impl._Mypair._Myval2)->m_context</Item>
+      <Item Name="m_userFields" Condition="((PaBodyImpl*)m_impl._Mypair._Myval2)->m_userFields != nullptr">*(((PaBodyImpl*)m_impl._Mypair._Myval2)->m_userFields)</Item>
+    </Expand>
+  </Type>
+</AutoVisualizer>
+""",
+                encoding="utf-8",
+            )
+            result = natvis_to_lldb.parse_natvis(natvis_path)
+            generated = natvis_to_lldb.generate_lldb_formatter(
+                result.types,
+                category="test_natvis",
+                source_name="pa_body.natvis",
+            )
+            generated_path = Path(tmp) / "generated.py"
+            generated_path.write_text(generated, encoding="utf-8")
+            generated_spec = importlib.util.spec_from_file_location(
+                "generated_cast_paths",
+                generated_path,
+            )
+            generated_module = importlib.util.module_from_spec(generated_spec)
+            assert generated_spec.loader is not None
+            generated_spec.loader.exec_module(generated_module)
+
+        class FakeError:
+            def Fail(self):
+                return False
+
+        class FakeType:
+            def __init__(self, name, *, is_pointer=False, pointee=None):
+                self.name = name
+                self.is_pointer = is_pointer
+                self.pointee = pointee
+
+            def IsValid(self):
+                return True
+
+            def IsPointerType(self):
+                return self.is_pointer
+
+            def IsReferenceType(self):
+                return False
+
+            def GetPointerType(self):
+                return FakeType(self.name + "*", is_pointer=True, pointee=self)
+
+            def GetPointeeType(self):
+                return self.pointee
+
+            def GetByteSize(self):
+                return 8
+
+        class FakeTarget:
+            def __init__(self):
+                self.types = {
+                    "PaBodyImpl": FakeType("PaBodyImpl"),
+                    "UserFields": FakeType("UserFields"),
+                }
+
+            def IsValid(self):
+                return True
+
+            def FindFirstType(self, name):
+                return self.types.get(name, FakeInvalidType())
+
+        class FakeInvalidType:
+            def IsValid(self):
+                return False
+
+        class FakeValue:
+            def __init__(
+                self,
+                name,
+                value=None,
+                *,
+                children=None,
+                type_obj=None,
+                pointee=None,
+                target=None,
+            ):
+                self.name = name
+                self.value = value
+                self.children = children or {}
+                self.type_obj = type_obj or FakeType("int")
+                self.pointee = pointee
+                self.target = target
+                self.evaluated = []
+
+            def clone(self, name, type_obj=None):
+                return FakeValue(
+                    name,
+                    self.value,
+                    children=self.children,
+                    type_obj=type_obj or self.type_obj,
+                    pointee=self.pointee,
+                    target=self.target,
+                )
+
+            def IsValid(self):
+                return True
+
+            def GetError(self):
+                return FakeError()
+
+            def GetName(self):
+                return self.name
+
+            def GetValue(self):
+                if self.value is not None:
+                    return str(self.value)
+                if self.type_obj.IsPointerType():
+                    return "0x1" if self.pointee is not None else "0x0"
+                return None
+
+            def GetSummary(self):
+                return None
+
+            def GetValueAsUnsigned(self):
+                if self.value is not None:
+                    return int(self.value)
+                return 1 if self.pointee is not None else 0
+
+            def GetData(self):
+                return self
+
+            def GetType(self):
+                return self.type_obj
+
+            def GetTypeName(self):
+                return self.type_obj.name
+
+            def GetNonSyntheticValue(self):
+                return self
+
+            def GetID(self):
+                return id(self)
+
+            def GetTarget(self):
+                return self.target
+
+            def GetChildMemberWithName(self, name):
+                return self.children.get(name, FakeInvalidValue())
+
+            def GetChildAtIndex(self, index):
+                return FakeInvalidValue()
+
+            def Dereference(self):
+                return self.pointee or FakeInvalidValue()
+
+            def Cast(self, type_obj):
+                return self.clone(self.name, type_obj)
+
+            def CreateValueFromData(self, name, data, type_obj):
+                return data.clone(name, type_obj)
+
+            def EvaluateExpression(self, expr):
+                self.evaluated.append(expr)
+                raise AssertionError("cast member paths should be resolved without expression eval")
+
+            def CreateValueFromExpression(self, name, expr):
+                raise AssertionError("cast member paths should be copied from data")
+
+        class FakeInvalidValue:
+            def IsValid(self):
+                return False
+
+            def GetError(self):
+                return FakeError()
+
+        target = FakeTarget()
+        user_fields = FakeValue(
+            "user_fields",
+            children={"value": FakeValue("value", 99, target=target)},
+            type_obj=FakeType("UserFields"),
+            target=target,
+        )
+        user_fields_ptr = FakeValue(
+            "m_userFields",
+            type_obj=FakeType(
+                "UserFields*",
+                is_pointer=True,
+                pointee=FakeType("UserFields"),
+            ),
+            pointee=user_fields,
+            target=target,
+        )
+        body_impl = FakeValue(
+            "body_impl",
+            children={
+                "m_tag": FakeValue("m_tag", 42, target=target),
+                "m_context": FakeValue("m_context", 123, target=target),
+                "m_userFields": user_fields_ptr,
+            },
+            type_obj=FakeType("PaBodyImpl"),
+            target=target,
+        )
+        raw_impl_ptr = FakeValue(
+            "_Myval2",
+            type_obj=FakeType("void*", is_pointer=True, pointee=FakeType("void")),
+            pointee=body_impl,
+            target=target,
+        )
+        body = FakeValue(
+            "body",
+            children={
+                "m_impl": FakeValue(
+                    "m_impl",
+                    children={
+                        "_Mypair": FakeValue(
+                            "_Mypair",
+                            children={"_Myval2": raw_impl_ptr},
+                            target=target,
+                        )
+                    },
+                    target=target,
+                )
+            },
+            type_obj=FakeType("PaBody"),
+            target=target,
+        )
+
+        summary = generated_module.summary_provider(body, {})
+        provider = generated_module.NatvisSyntheticProvider(body, {})
+
+        self.assertEqual(summary, "tag=42")
+        self.assertEqual(provider.num_children(), 2)
+        self.assertEqual(provider.get_child_at_index(0).GetName(), "m_context")
+        self.assertEqual(provider.get_child_at_index(0).GetValue(), "123")
+        self.assertEqual(provider.get_child_at_index(1).GetName(), "m_userFields")
+        self.assertEqual(provider.get_child_at_index(1).GetChildMemberWithName("value").GetValue(), "99")
 
     def test_generated_formatter_does_not_raise_when_lldb_calls_fail(self):
         result = natvis_to_lldb.parse_natvis(ROOT / "examples" / "sample.natvis")

@@ -456,7 +456,12 @@ def _eval_with_context(valobj, expr, context):
 def _condition_matches(valobj, condition, context=None):
     if not condition:
         return True
-    value, error = _eval_with_context(valobj, condition, context)
+    expression = _substitute_context(condition, context)
+    binary_result = _eval_binary_condition(valobj, expression)
+    if binary_result is not None:
+        return binary_result
+
+    value, error = _eval_value(valobj, expression)
     if error:
         return False
 
@@ -553,8 +558,294 @@ def _value_error(value):
     return None
 
 
+def _find_matching_paren(text, open_index):
+    depth = 0
+    for index in range(open_index, len(text)):
+        char = text[index]
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return index
+    return None
+
+
+def _strip_outer_parens(expr):
+    expr = (expr or "").strip()
+    while expr.startswith("("):
+        close = _find_matching_paren(expr, 0)
+        if close != len(expr) - 1:
+            break
+        expr = expr[1:-1].strip()
+    return expr
+
+
+def _is_pointer_cast_type(type_name):
+    text = re.sub(r"\\s+", " ", (type_name or "").strip())
+    if not text.endswith("*"):
+        return False
+    text = text[:-1].strip()
+    return bool(text and not re.search(r"[()+\\-/%=!<>]", text))
+
+
+def _split_c_style_pointer_cast(expr):
+    expr = (expr or "").strip()
+    if not expr.startswith("("):
+        return None
+
+    close = _find_matching_paren(expr, 0)
+    if close is None:
+        return None
+
+    first = expr[1:close].strip()
+    rest = expr[close + 1 :].strip()
+
+    nested = _strip_outer_parens(first)
+    if nested.startswith("("):
+        type_close = _find_matching_paren(nested, 0)
+        if type_close is not None:
+            type_name = nested[1:type_close].strip()
+            base_expr = nested[type_close + 1 :].strip()
+            if _is_pointer_cast_type(type_name) and base_expr:
+                return type_name, base_expr, rest
+
+    if _is_pointer_cast_type(first) and rest:
+        return first, rest, ""
+
+    return None
+
+
+def _split_top_level_access(expr):
+    depth = 0
+    index = 0
+    while index < len(expr):
+        char = expr[index]
+        if char in "([":
+            depth += 1
+        elif char in ")]":
+            depth = max(0, depth - 1)
+        elif depth == 0:
+            if expr.startswith("->", index):
+                head = expr[:index].strip()
+                tail = expr[index + 2 :].strip()
+                if head and tail:
+                    return head, "->", tail
+            if char == ".":
+                head = expr[:index].strip()
+                tail = expr[index + 1 :].strip()
+                if head and tail:
+                    return head, ".", tail
+        index += 1
+    return None
+
+
+def _split_member_token(text):
+    match = re.match(r"^([A-Za-z_]\\w*)((?:\\[[0-9]+\\])*)", text)
+    if not match:
+        return None
+    name = match.group(1)
+    indexes = [int(item) for item in re.findall(r"\\[([0-9]+)\\]", match.group(2))]
+    rest = text[match.end() :].strip()
+    return name, indexes, rest
+
+
+def _dereference_value(value):
+    if _value_error(value):
+        return None
+    try:
+        value = _raw_value(value)
+        dereferenced = value.Dereference()
+        if dereferenced is not None and dereferenced.IsValid():
+            return _raw_value(dereferenced)
+    except Exception:
+        pass
+    return None
+
+
+def _child_member(value, name):
+    if _value_error(value):
+        return None
+    try:
+        value = _raw_value(value)
+        child = value.GetChildMemberWithName(name)
+        if child is not None and child.IsValid():
+            return child
+    except Exception:
+        pass
+
+    dereferenced = _dereference_value(value)
+    if dereferenced is None:
+        return None
+    try:
+        child = dereferenced.GetChildMemberWithName(name)
+        if child is not None and child.IsValid():
+            return child
+    except Exception:
+        pass
+    return None
+
+
+def _child_at_index(value, index):
+    if _value_error(value):
+        return None
+    try:
+        child = _raw_value(value).GetChildAtIndex(index)
+        if child is not None and child.IsValid():
+            return child
+    except Exception:
+        pass
+    return None
+
+
+def _apply_access_tail(value, first_operator, tail):
+    current = value
+    operator = first_operator
+    rest = (tail or "").strip()
+    while rest:
+        token = _split_member_token(rest)
+        if token is None:
+            return None
+        name, indexes, rest = token
+
+        if operator == "->":
+            current = _dereference_value(current)
+            if current is None:
+                return None
+
+        current = _child_member(current, name)
+        if current is None:
+            return None
+
+        for index in indexes:
+            current = _child_at_index(current, index)
+            if current is None:
+                return None
+
+        if not rest:
+            return current
+        if rest.startswith("->"):
+            operator = "->"
+            rest = rest[2:].strip()
+        elif rest.startswith("."):
+            operator = "."
+            rest = rest[1:].strip()
+        else:
+            return None
+    return current
+
+
+def _get_target(valobj):
+    for candidate in _candidate_contexts(valobj):
+        try:
+            target = candidate.GetTarget()
+            if target is not None and target.IsValid():
+                return target
+        except Exception:
+            pass
+        try:
+            process = candidate.GetProcess()
+            target = process.GetTarget()
+            if target is not None and target.IsValid():
+                return target
+        except Exception:
+            pass
+    return None
+
+
+def _cast_type_base_and_depth(type_name):
+    text = re.sub(r"\\s+", " ", (type_name or "").strip())
+    pointer_depth = 0
+    while text.endswith("*"):
+        pointer_depth += 1
+        text = text[:-1].strip()
+    for prefix in ("const ", "volatile ", "struct ", "class "):
+        if text.startswith(prefix):
+            text = text[len(prefix) :].strip()
+    return text, pointer_depth
+
+
+def _find_cast_type(valobj, type_name):
+    base_name, pointer_depth = _cast_type_base_and_depth(type_name)
+    if not base_name:
+        return None
+    target = _get_target(valobj)
+    if target is None:
+        return None
+
+    type_obj = None
+    for candidate in (base_name, "struct " + base_name, "class " + base_name):
+        try:
+            found = target.FindFirstType(candidate)
+            if found is not None and found.IsValid():
+                type_obj = found
+                break
+        except Exception:
+            pass
+    if type_obj is None:
+        return None
+
+    for _ in range(pointer_depth):
+        try:
+            type_obj = type_obj.GetPointerType()
+        except Exception:
+            return None
+    return type_obj
+
+
+def _cast_value_to_type(valobj, value, type_name):
+    if _value_error(value):
+        return None
+    cast_type = _find_cast_type(valobj, type_name)
+    if cast_type is None:
+        return value
+    try:
+        casted = _raw_value(value).Cast(cast_type)
+        if casted is not None and casted.IsValid():
+            return casted
+    except Exception:
+        pass
+    return value
+
+
+def _get_value_by_natvis_path(valobj, expr, depth=0):
+    if depth > 12:
+        return None
+    expr = _strip_outer_parens(_strip_natvis_format(expr or ""))
+    if not expr:
+        return None
+
+    if expr.startswith("*"):
+        inner = _strip_outer_parens(expr[1:].strip())
+        value = _get_value_by_natvis_path(valobj, inner, depth + 1)
+        return _dereference_value(value)
+
+    cast = _split_c_style_pointer_cast(expr)
+    if cast is not None:
+        type_name, base_expr, tail = cast
+        base_value = _get_value_by_natvis_path(valobj, base_expr, depth + 1)
+        casted = _cast_value_to_type(valobj, base_value, type_name)
+        if _value_error(casted):
+            return None
+        if not tail:
+            return casted
+        if tail.startswith("->"):
+            return _apply_access_tail(casted, "->", tail[2:].strip())
+        if tail.startswith("."):
+            return _apply_access_tail(casted, ".", tail[1:].strip())
+        return None
+
+    access = _split_top_level_access(expr)
+    if access is not None:
+        head, operator, tail = access
+        head_value = _get_value_by_natvis_path(valobj, head, depth + 1)
+        return _apply_access_tail(head_value, operator, tail)
+
+    return _get_child_by_simple_path(valobj, expr)
+
+
 def _eval_value(valobj, expr):
-    direct_child = _get_child_by_simple_path(valobj, expr)
+    direct_child = _get_value_by_natvis_path(valobj, expr)
     if direct_child is not None:
         return direct_child, None
 
@@ -612,16 +903,10 @@ def _get_child_by_simple_path(valobj, expr):
     current = _raw_value(_expression_context(valobj))
     for part in parts:
         try:
-            current = _raw_value(current)
             if isinstance(part, int):
-                current = current.GetChildAtIndex(part)
+                current = _child_at_index(current, part)
             else:
-                child = current.GetChildMemberWithName(part)
-                if not child or not child.IsValid():
-                    maybe_pointer = current.Dereference()
-                    if maybe_pointer is not None and maybe_pointer.IsValid():
-                        child = maybe_pointer.GetChildMemberWithName(part)
-                current = child
+                current = _child_member(current, part)
         except Exception:
             return None
         if _value_error(current):
@@ -630,7 +915,7 @@ def _get_child_by_simple_path(valobj, expr):
 
 
 def _create_value_from_expression(valobj, name, expr):
-    direct_child = _get_child_by_simple_path(valobj, expr)
+    direct_child = _get_value_by_natvis_path(valobj, expr)
     copied = _copy_value_with_name(valobj, name, direct_child)
     if copied is not None:
         return copied
@@ -670,6 +955,105 @@ def _eval_int_expression(valobj, expr):
         return _value_as_int(value)
     except Exception:
         return None
+
+
+def _split_top_level_operator(expr, operators):
+    depth = 0
+    index = 0
+    while index < len(expr):
+        char = expr[index]
+        if char in "([":
+            depth += 1
+        elif char in ")]":
+            depth = max(0, depth - 1)
+        elif depth == 0:
+            for operator in operators:
+                if not expr.startswith(operator, index):
+                    continue
+                if operator.startswith(">") and index > 0 and expr[index - 1] == "-":
+                    continue
+                left = expr[:index].strip()
+                right = expr[index + len(operator) :].strip()
+                if left and right:
+                    return left, operator, right
+        index += 1
+    return None
+
+
+def _literal_int(expr):
+    text = _strip_outer_parens(expr or "").strip().lower()
+    if text in ("nullptr", "null", "false"):
+        return 0
+    if text == "true":
+        return 1
+    try:
+        return int(text, 0)
+    except Exception:
+        return None
+
+
+def _eval_int_or_literal(valobj, expr):
+    literal = _literal_int(expr)
+    if literal is not None:
+        return literal
+    return _eval_int_expression(valobj, expr)
+
+
+def _eval_binary_condition(valobj, expr):
+    expr = _strip_outer_parens(expr or "")
+    if not expr:
+        return None
+
+    logical = _split_top_level_operator(expr, ("||",))
+    if logical is not None:
+        left, _, right = logical
+        left_value = _eval_binary_condition(valobj, left)
+        if left_value is True:
+            return True
+        right_value = _eval_binary_condition(valobj, right)
+        if left_value is None or right_value is None:
+            return None
+        return bool(left_value or right_value)
+
+    logical = _split_top_level_operator(expr, ("&&",))
+    if logical is not None:
+        left, _, right = logical
+        left_value = _eval_binary_condition(valobj, left)
+        if left_value is False:
+            return False
+        right_value = _eval_binary_condition(valobj, right)
+        if left_value is None or right_value is None:
+            return None
+        return bool(left_value and right_value)
+
+    if expr.startswith("!") and not expr.startswith("!="):
+        nested = _eval_binary_condition(valobj, expr[1:].strip())
+        if nested is not None:
+            return not nested
+
+    comparison = _split_top_level_operator(expr, ("!=", "==", ">=", "<=", ">", "<"))
+    if comparison is None:
+        return None
+
+    left, operator, right = comparison
+    left_value = _eval_int_or_literal(valobj, left)
+    right_value = _eval_int_or_literal(valobj, right)
+    if left_value is None or right_value is None:
+        return None
+
+    if operator == "!=":
+        return left_value != right_value
+    if operator == "==":
+        return left_value == right_value
+    if operator == ">=":
+        return left_value >= right_value
+    if operator == "<=":
+        return left_value <= right_value
+    if operator == ">":
+        return left_value > right_value
+    if operator == "<":
+        return left_value < right_value
+    return None
 
 
 def _format_raw_value(value):
