@@ -121,6 +121,37 @@ class NatvisToLldbTests(unittest.TestCase):
         self.assertEqual(result.types[0].items[1].condition, "kind_ != 0")
         self.assertEqual(result.types[0].array_items.condition, "data_ != 0")
 
+    def test_alternative_types_reuse_visualization(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "alternative_types.natvis"
+            path.write_text(
+                """<?xml version="1.0" encoding="utf-8"?>
+<AutoVisualizer xmlns="http://schemas.microsoft.com/vstudio/debugger/natvis/2010">
+  <Type Name="demo::Primary&lt;*&gt;" Condition="enabled_">
+    <AlternativeType Name="demo::Alias&lt;*&gt;" />
+    <AlternativeType Name="demo::AliasWhenReady" Condition="ready_" />
+    <DisplayString>size={size_}</DisplayString>
+    <Expand>
+      <Item Name="[size]">size_</Item>
+    </Expand>
+  </Type>
+</AutoVisualizer>
+""",
+                encoding="utf-8",
+            )
+            result = natvis_to_lldb.parse_natvis(path)
+
+        self.assertEqual(result.warnings, [])
+        self.assertEqual([item.name for item in result.types], [
+            "demo::Primary<*>",
+            "demo::Alias<*>",
+            "demo::AliasWhenReady",
+        ])
+        self.assertEqual(result.types[1].display_string, "size={size_}")
+        self.assertEqual(result.types[1].items[0].expression, "size_")
+        self.assertEqual(result.types[1].condition, "enabled_")
+        self.assertEqual(result.types[2].condition, "ready_")
+
 
 if __name__ == "__main__":
     unittest.main()

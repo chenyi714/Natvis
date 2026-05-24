@@ -65,6 +65,12 @@ class NatvisType:
 
 
 @dataclasses.dataclass
+class NatvisAlternativeType:
+    name: str
+    condition: str | None = None
+
+
+@dataclasses.dataclass
 class ParseResult:
     types: list[NatvisType]
     warnings: list[str]
@@ -142,6 +148,7 @@ def parse_natvis(path: Path) -> ParseResult:
         display_string = _first_child_text(type_elem, "DisplayString")
         string_view = _first_child_text(type_elem, "StringView")
         items: list[NatvisItem] = []
+        alternative_types: list[NatvisAlternativeType] = []
         array_items: NatvisArrayItems | None = None
 
         expand = _first_child(type_elem, "Expand")
@@ -179,7 +186,18 @@ def parse_natvis(path: Path) -> ParseResult:
             tag = _local_name(child.tag)
             if tag in {"DisplayString", "StringView", "Expand"}:
                 continue
-            if tag in {"AlternativeType", "Intrinsic", "UIVisualizer"}:
+            if tag == "AlternativeType":
+                alternative_name = _attribute(child, "Name")
+                if alternative_name:
+                    alternative_types.append(
+                        NatvisAlternativeType(
+                            name=alternative_name,
+                            condition=_attribute(child, "Condition") or type_condition,
+                        )
+                    )
+                else:
+                    warnings.append(f"{name}: Skipping <AlternativeType> without a Name attribute.")
+            elif tag in {"Intrinsic", "UIVisualizer"}:
                 warnings.append(f"{name}: top-level <{tag}> is not generated yet.")
             elif tag not in {"Version"}:
                 warnings.append(f"{name}: top-level <{tag}> is ignored.")
@@ -198,6 +216,15 @@ def parse_natvis(path: Path) -> ParseResult:
             warnings.append(f"{name}: no supported visualization nodes found.")
             continue
         result.append(natvis_type)
+        for alternative_type in alternative_types:
+            result.append(
+                dataclasses.replace(
+                    natvis_type,
+                    name=alternative_type.name,
+                    regex=natvis_type_to_regex(alternative_type.name),
+                    condition=alternative_type.condition,
+                )
+            )
 
     return ParseResult(types=result, warnings=warnings)
 

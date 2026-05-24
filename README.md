@@ -14,6 +14,7 @@ quickly, then leave the truly complex types as explicit follow-up work.
 - `Expand` / `Item`
 - `Expand` / `ArrayItems` with `Size` and `ValuePointer`
 - `Condition` on `Type`, `Item`, and `ArrayItems`
+- `AlternativeType`
 
 The converter warns on advanced nodes such as `CustomListItems`,
 `IndexListItems`, `LinkedListItems`, and `TreeItems`. Those usually need a
