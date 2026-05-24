@@ -92,6 +92,35 @@ class NatvisToLldbTests(unittest.TestCase):
         self.assertEqual(len(result.types), 1)
         self.assertEqual(result.types[0].items[0].expression, "value_")
 
+    def test_conditions_are_preserved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "conditions.natvis"
+            path.write_text(
+                """<?xml version="1.0" encoding="utf-8"?>
+<AutoVisualizer xmlns="http://schemas.microsoft.com/vstudio/debugger/natvis/2010">
+  <Type Name="demo::Conditional" Condition="is_valid_">
+    <DisplayString>kind={kind_}</DisplayString>
+    <Expand>
+      <Item Name="[small]" Condition="kind_ == 0">small_</Item>
+      <Item Name="[large]" Condition="kind_ != 0">large_</Item>
+      <ArrayItems Condition="data_ != 0">
+        <Size>size_</Size>
+        <ValuePointer>data_</ValuePointer>
+      </ArrayItems>
+    </Expand>
+  </Type>
+</AutoVisualizer>
+""",
+                encoding="utf-8",
+            )
+            result = natvis_to_lldb.parse_natvis(path)
+
+        self.assertEqual(result.warnings, [])
+        self.assertEqual(result.types[0].condition, "is_valid_")
+        self.assertEqual(result.types[0].items[0].condition, "kind_ == 0")
+        self.assertEqual(result.types[0].items[1].condition, "kind_ != 0")
+        self.assertEqual(result.types[0].array_items.condition, "data_ != 0")
+
 
 if __name__ == "__main__":
     unittest.main()

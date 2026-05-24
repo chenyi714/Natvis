@@ -34,18 +34,21 @@ KNOWN_BUT_UNSUPPORTED = {
 class NatvisItem:
     name: str
     expression: str
+    condition: str | None = None
 
 
 @dataclasses.dataclass
 class NatvisArrayItems:
     size: str
     value_pointer: str
+    condition: str | None = None
 
 
 @dataclasses.dataclass
 class NatvisType:
     name: str
     regex: str
+    condition: str | None
     display_string: str | None
     string_view: str | None
     items: list[NatvisItem]
@@ -97,6 +100,14 @@ def _first_child_text(element: ET.Element, local_name: str) -> str | None:
     return _text(_first_child(element, local_name))
 
 
+def _attribute(element: ET.Element, name: str) -> str | None:
+    value = element.attrib.get(name)
+    if value is None:
+        return None
+    value = value.strip()
+    return value or None
+
+
 def natvis_type_to_regex(type_name: str) -> str:
     """Convert Natvis' simple '*' wildcard type pattern to an LLDB regex."""
 
@@ -126,8 +137,7 @@ def parse_natvis(path: Path) -> ParseResult:
             warnings.append("Skipping <Type> without a Name attribute.")
             continue
 
-        if type_elem.attrib.get("Condition"):
-            warnings.append(f"{name}: Type-level Condition is ignored.")
+        type_condition = _attribute(type_elem, "Condition")
 
         display_string = _first_child_text(type_elem, "DisplayString")
         string_view = _first_child_text(type_elem, "StringView")
@@ -138,9 +148,7 @@ def parse_natvis(path: Path) -> ParseResult:
         if expand is not None:
             for child in _children(expand):
                 tag = _local_name(child.tag)
-
-                if child.attrib.get("Condition"):
-                    warnings.append(f"{name}: Condition on <{tag}> is ignored.")
+                condition = _attribute(child, "Condition")
 
                 if tag == "Item":
                     expr = _text(child)
@@ -148,12 +156,16 @@ def parse_natvis(path: Path) -> ParseResult:
                         warnings.append(f"{name}: Skipping empty <Item>.")
                         continue
                     item_name = child.attrib.get("Name", "").strip() or expr
-                    items.append(NatvisItem(name=item_name, expression=expr))
+                    items.append(NatvisItem(name=item_name, expression=expr, condition=condition))
                 elif tag == "ArrayItems":
                     size = _first_child_text(child, "Size")
                     value_pointer = _first_child_text(child, "ValuePointer")
                     if size and value_pointer:
-                        array_items = NatvisArrayItems(size=size, value_pointer=value_pointer)
+                        array_items = NatvisArrayItems(
+                            size=size,
+                            value_pointer=value_pointer,
+                            condition=condition,
+                        )
                     else:
                         warnings.append(
                             f"{name}: <ArrayItems> needs both <Size> and <ValuePointer>."
@@ -175,6 +187,7 @@ def parse_natvis(path: Path) -> ParseResult:
         natvis_type = NatvisType(
             name=name,
             regex=natvis_type_to_regex(name),
+            condition=type_condition,
             display_string=display_string,
             string_view=string_view,
             items=items,
@@ -196,6 +209,7 @@ def _python_specs(types: list[NatvisType]) -> str:
             {
                 "name": item.name,
                 "regex": item.regex,
+                "condition": item.condition,
                 "display_string": item.display_string,
                 "string_view": item.string_view,
                 "items": [dataclasses.asdict(child) for child in item.items],
@@ -241,10 +255,40 @@ def _clean_type_name(type_name):
     return cleaned
 
 
-def _find_spec(type_name):
+def _condition_matches(valobj, condition):
+    if not condition:
+        return True
+    value, error = _eval_value(valobj, condition)
+    if error:
+        return False
+
+    raw = value.GetValue()
+    if raw is not None:
+        text = raw.strip().lower()
+        if text in ("true", "false"):
+            return text == "true"
+        try:
+            return int(text, 0) != 0
+        except ValueError:
+            pass
+
+    summary = value.GetSummary()
+    if summary is not None:
+        text = summary.strip('"').strip().lower()
+        if text in ("true", "false"):
+            return text == "true"
+
+    try:
+        return value.GetValueAsUnsigned() != 0
+    except Exception:
+        return False
+
+
+def _find_spec(valobj):
+    type_name = valobj.GetTypeName()
     cleaned = _clean_type_name(type_name)
     for regex, spec in _COMPILED:
-        if regex.match(cleaned):
+        if regex.match(cleaned) and _condition_matches(valobj, spec.get("condition")):
             return spec
     return None
 
@@ -343,7 +387,7 @@ def _render_display(valobj, template):
 
 
 def summary_provider(valobj, internal_dict, options=None):
-    spec = _find_spec(valobj.GetTypeName())
+    spec = _find_spec(valobj)
     if spec is None:
         return ""
     if spec.get("display_string"):
@@ -357,8 +401,8 @@ def summary_provider(valobj, internal_dict, options=None):
 class NatvisSyntheticProvider:
     def __init__(self, valobj, internal_dict):
         self.valobj = valobj
-        self.spec = _find_spec(valobj.GetTypeName()) or {}
-        self.items = list(self.spec.get("items") or [])
+        self.spec = _find_spec(valobj) or {}
+        self.items = []
         self.array_items = self.spec.get("array_items")
         self.array_size = 0
         self.array_pointer = None
@@ -367,7 +411,13 @@ class NatvisSyntheticProvider:
     def update(self):
         self.array_size = 0
         self.array_pointer = None
-        if self.array_items:
+        self.items = [
+            item for item in self.spec.get("items") or []
+            if _condition_matches(self.valobj, item.get("condition"))
+        ]
+        if self.array_items and _condition_matches(
+            self.valobj, self.array_items.get("condition")
+        ):
             size_value, _ = _eval_value(self.valobj, self.array_items["size"])
             if size_value is not None:
                 self.array_size = int(size_value.GetValueAsUnsigned())
