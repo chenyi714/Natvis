@@ -13,11 +13,13 @@ quickly, then leave the truly complex types as explicit follow-up work.
 - `StringView`
 - `Expand` / `Item`
 - `Expand` / `ArrayItems` with `Size` and `ValuePointer`
-- `Condition` on `Type`, `Item`, and `ArrayItems`
+- `Expand` / `CustomListItems` with `Variable`, `Size`, `Loop`, `If`,
+  `Break`, `Exec`, and `Item`
+- `Condition` on `Type`, `Item`, `ArrayItems`, and CustomListItems steps
 - `AlternativeType`
 
-The converter warns on advanced nodes such as `CustomListItems`,
-`IndexListItems`, `LinkedListItems`, and `TreeItems`. Those usually need a
+The converter warns on advanced nodes such as `IndexListItems`,
+`LinkedListItems`, and `TreeItems`. Those usually need a
 hand-written LLDB synthetic provider because their traversal logic is too
 specific to translate safely.
 

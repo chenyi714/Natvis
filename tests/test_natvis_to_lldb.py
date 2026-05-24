@@ -152,6 +152,49 @@ class NatvisToLldbTests(unittest.TestCase):
         self.assertEqual(result.types[1].condition, "enabled_")
         self.assertEqual(result.types[2].condition, "ready_")
 
+    def test_custom_list_items_are_preserved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "custom_list_items.natvis"
+            path.write_text(
+                """<?xml version="1.0" encoding="utf-8"?>
+<AutoVisualizer xmlns="http://schemas.microsoft.com/vstudio/debugger/natvis/2010">
+  <Type Name="demo::BucketList">
+    <DisplayString>size={size_}</DisplayString>
+    <Expand>
+      <CustomListItems MaxItemsPerView="128">
+        <Variable Name="i" InitialValue="0" />
+        <Size>size_</Size>
+        <Loop Condition="i &lt; size_">
+          <Item Name="[{i}]">data_[i],na</Item>
+          <Exec>i++</Exec>
+        </Loop>
+      </CustomListItems>
+    </Expand>
+  </Type>
+</AutoVisualizer>
+""",
+                encoding="utf-8",
+            )
+            result = natvis_to_lldb.parse_natvis(path)
+
+        self.assertEqual(result.warnings, [])
+        custom_list = result.types[0].custom_list_items[0]
+        self.assertEqual(custom_list.max_items_per_view, 128)
+        self.assertEqual(custom_list.size, "size_")
+        self.assertEqual(custom_list.variables[0].name, "i")
+        self.assertEqual(custom_list.steps[0].kind, "Loop")
+        self.assertEqual(custom_list.steps[0].children[0].kind, "Item")
+
+        generated = natvis_to_lldb.generate_lldb_formatter(
+            result.types,
+            category="test_natvis",
+            source_name="custom_list_items.natvis",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            generated_path = Path(tmp) / "generated.py"
+            generated_path.write_text(generated, encoding="utf-8")
+            py_compile.compile(str(generated_path), doraise=True)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -19,9 +19,8 @@ from pathlib import Path
 from typing import Iterable
 
 
-SUPPORTED_EXPAND_CHILDREN = {"Item", "ArrayItems"}
+SUPPORTED_EXPAND_CHILDREN = {"Item", "ArrayItems", "CustomListItems"}
 KNOWN_BUT_UNSUPPORTED = {
-    "CustomListItems",
     "IndexListItems",
     "LinkedListItems",
     "TreeItems",
@@ -45,6 +44,30 @@ class NatvisArrayItems:
 
 
 @dataclasses.dataclass
+class NatvisCustomListVariable:
+    name: str
+    initial_value: str
+
+
+@dataclasses.dataclass
+class NatvisCustomListStep:
+    kind: str
+    expression: str | None = None
+    name: str | None = None
+    condition: str | None = None
+    children: list["NatvisCustomListStep"] = dataclasses.field(default_factory=list)
+
+
+@dataclasses.dataclass
+class NatvisCustomListItems:
+    condition: str | None
+    max_items_per_view: int | None
+    size: str | None
+    variables: list[NatvisCustomListVariable]
+    steps: list[NatvisCustomListStep]
+
+
+@dataclasses.dataclass
 class NatvisType:
     name: str
     regex: str
@@ -53,6 +76,7 @@ class NatvisType:
     string_view: str | None
     items: list[NatvisItem]
     array_items: NatvisArrayItems | None
+    custom_list_items: list[NatvisCustomListItems]
     source_line: int | None = None
 
     @property
@@ -61,7 +85,7 @@ class NatvisType:
 
     @property
     def has_children(self) -> bool:
-        return bool(self.items or self.array_items)
+        return bool(self.items or self.array_items or self.custom_list_items)
 
 
 @dataclasses.dataclass
@@ -114,6 +138,17 @@ def _attribute(element: ET.Element, name: str) -> str | None:
     return value or None
 
 
+def _int_attribute(element: ET.Element, name: str, type_name: str, warnings: list[str]) -> int | None:
+    value = _attribute(element, name)
+    if value is None:
+        return None
+    try:
+        return int(value, 0)
+    except ValueError:
+        warnings.append(f"{type_name}: Ignoring non-integer {name}={value!r}.")
+        return None
+
+
 def natvis_type_to_regex(type_name: str) -> str:
     """Convert Natvis' simple '*' wildcard type pattern to an LLDB regex."""
 
@@ -127,6 +162,114 @@ def natvis_type_to_regex(type_name: str) -> str:
             pieces.append(re.escape(char))
     pieces.append("$")
     return "".join(pieces)
+
+
+def _parse_custom_list_steps(
+    element: ET.Element,
+    type_name: str,
+    warnings: list[str],
+) -> list[NatvisCustomListStep]:
+    steps: list[NatvisCustomListStep] = []
+    for child in _children(element):
+        tag = _local_name(child.tag)
+        condition = _attribute(child, "Condition")
+
+        if tag == "Exec":
+            expression = _text(child)
+            if expression:
+                steps.append(
+                    NatvisCustomListStep(
+                        kind="Exec",
+                        expression=expression,
+                        condition=condition,
+                    )
+                )
+            else:
+                warnings.append(f"{type_name}: Skipping empty <Exec> in <CustomListItems>.")
+        elif tag == "Item":
+            expression = _text(child)
+            if expression:
+                steps.append(
+                    NatvisCustomListStep(
+                        kind="Item",
+                        expression=expression,
+                        name=_attribute(child, "Name"),
+                        condition=condition,
+                    )
+                )
+            else:
+                warnings.append(f"{type_name}: Skipping empty <Item> in <CustomListItems>.")
+        elif tag == "Break":
+            steps.append(NatvisCustomListStep(kind="Break", condition=condition))
+        elif tag == "If":
+            if not condition:
+                warnings.append(f"{type_name}: <If> without Condition is ignored.")
+                continue
+            steps.append(
+                NatvisCustomListStep(
+                    kind="If",
+                    condition=condition,
+                    children=_parse_custom_list_steps(child, type_name, warnings),
+                )
+            )
+        elif tag == "Loop":
+            steps.append(
+                NatvisCustomListStep(
+                    kind="Loop",
+                    condition=condition,
+                    children=_parse_custom_list_steps(child, type_name, warnings),
+                )
+            )
+        elif tag in {"Variable", "Size"}:
+            warnings.append(f"{type_name}: <{tag}> must be a direct <CustomListItems> child.")
+        else:
+            warnings.append(f"{type_name}: <{tag}> in <CustomListItems> is ignored.")
+    return steps
+
+
+def _parse_custom_list_items(
+    element: ET.Element,
+    type_name: str,
+    warnings: list[str],
+) -> NatvisCustomListItems:
+    variables: list[NatvisCustomListVariable] = []
+    steps: list[NatvisCustomListStep] = []
+    size: str | None = None
+
+    for child in _children(element):
+        tag = _local_name(child.tag)
+        if tag == "Variable":
+            variable_name = _attribute(child, "Name")
+            initial_value = _attribute(child, "InitialValue")
+            if variable_name and initial_value:
+                variables.append(
+                    NatvisCustomListVariable(
+                        name=variable_name,
+                        initial_value=initial_value,
+                    )
+                )
+            else:
+                warnings.append(
+                    f"{type_name}: <Variable> needs both Name and InitialValue attributes."
+                )
+        elif tag == "Size":
+            size = _text(child)
+            if not size:
+                warnings.append(f"{type_name}: Skipping empty <Size> in <CustomListItems>.")
+        elif tag in {"Exec", "Item", "Break", "If", "Loop"}:
+            wrapper = ET.Element("CustomListCode")
+            wrapper.append(child)
+            steps.extend(_parse_custom_list_steps(wrapper, type_name, warnings))
+        else:
+            warnings.append(f"{type_name}: <{tag}> in <CustomListItems> is ignored.")
+
+    return NatvisCustomListItems(
+        condition=_attribute(element, "Condition"),
+        max_items_per_view=_int_attribute(element, "MaxItemsPerView", type_name, warnings),
+        size=size,
+        variables=variables,
+        steps=steps,
+    )
 
 
 def parse_natvis(path: Path) -> ParseResult:
@@ -150,6 +293,7 @@ def parse_natvis(path: Path) -> ParseResult:
         items: list[NatvisItem] = []
         alternative_types: list[NatvisAlternativeType] = []
         array_items: NatvisArrayItems | None = None
+        custom_list_items: list[NatvisCustomListItems] = []
 
         expand = _first_child(type_elem, "Expand")
         if expand is not None:
@@ -177,6 +321,8 @@ def parse_natvis(path: Path) -> ParseResult:
                         warnings.append(
                             f"{name}: <ArrayItems> needs both <Size> and <ValuePointer>."
                         )
+                elif tag == "CustomListItems":
+                    custom_list_items.append(_parse_custom_list_items(child, name, warnings))
                 elif tag in KNOWN_BUT_UNSUPPORTED:
                     warnings.append(f"{name}: <{tag}> is not generated yet.")
                 elif tag not in SUPPORTED_EXPAND_CHILDREN:
@@ -210,6 +356,7 @@ def parse_natvis(path: Path) -> ParseResult:
             string_view=string_view,
             items=items,
             array_items=array_items,
+            custom_list_items=custom_list_items,
         )
 
         if not natvis_type.has_summary and not natvis_type.has_children:
@@ -243,6 +390,10 @@ def _python_specs(types: list[NatvisType]) -> str:
                 "array_items": (
                     dataclasses.asdict(item.array_items) if item.array_items is not None else None
                 ),
+                "custom_list_items": [
+                    dataclasses.asdict(custom_list_item)
+                    for custom_list_item in item.custom_list_items
+                ],
             }
         )
     return pprint.pformat(data, width=100, sort_dicts=False)
@@ -282,10 +433,30 @@ def _clean_type_name(type_name):
     return cleaned
 
 
-def _condition_matches(valobj, condition):
+def _substitute_context(expr, context):
+    if not context or not expr:
+        return expr
+
+    def replace(match):
+        name = match.group(0)
+        if name not in context:
+            return name
+        start = match.start()
+        if start > 0 and expr[start - 1] in (".", ">"):
+            return name
+        return "({})".format(context[name])
+
+    return re.sub(r"\\b[A-Za-z_]\\w*\\b", replace, expr)
+
+
+def _eval_with_context(valobj, expr, context):
+    return _eval_value(valobj, _substitute_context(expr, context))
+
+
+def _condition_matches(valobj, condition, context=None):
     if not condition:
         return True
-    value, error = _eval_value(valobj, condition)
+    value, error = _eval_with_context(valobj, condition, context)
     if error:
         return False
 
@@ -340,6 +511,28 @@ def _eval_value(valobj, expr):
     return value, None
 
 
+def _value_as_int(value):
+    raw = value.GetValue()
+    if raw is not None:
+        text = raw.strip().lower()
+        if text == "true":
+            return 1
+        if text in ("false", "nullptr", "null"):
+            return 0
+        return int(text, 0)
+    return int(value.GetValueAsSigned())
+
+
+def _eval_int_expression(valobj, expr):
+    value, error = _eval_value(valobj, expr)
+    if error:
+        return None
+    try:
+        return _value_as_int(value)
+    except Exception:
+        return None
+
+
 def _format_raw_value(value):
     if value is None:
         return "<invalid>"
@@ -386,7 +579,17 @@ def _split_display_token(token):
     return expr.strip(), fmt.strip()
 
 
-def _render_display(valobj, template):
+def _strip_natvis_format(expression):
+    if not expression or "," not in expression:
+        return expression
+    expr, suffix = expression.rsplit(",", 1)
+    suffix = suffix.strip()
+    if re.match(r"^[A-Za-z][A-Za-z0-9_]{0,8}$", suffix):
+        return expr.strip()
+    return expression
+
+
+def _render_display(valobj, template, context=None):
     out = []
     i = 0
     while i < len(template):
@@ -407,7 +610,7 @@ def _render_display(valobj, template):
             out.append(template[i:])
             break
         expr, fmt = _split_display_token(template[i + 1 : end])
-        value, error = _eval_value(valobj, expr)
+        value, error = _eval_with_context(valobj, expr, context)
         out.append("<{}>".format(error) if error else _format_value(value, fmt))
         i = end + 1
     return "".join(out)
@@ -425,12 +628,196 @@ def summary_provider(valobj, internal_dict, options=None):
     return ""
 
 
+def _context_arithmetic_result(valobj, expression):
+    value = _eval_int_expression(valobj, expression)
+    if value is None:
+        return "({})".format(expression)
+    return str(value)
+
+
+def _split_top_level_args(text):
+    args = []
+    start = 0
+    depth = 0
+    for index, char in enumerate(text):
+        if char in "([{<":
+            depth += 1
+        elif char in ")]}>":
+            depth = max(0, depth - 1)
+        elif char == "," and depth == 0:
+            args.append(text[start:index].strip())
+            start = index + 1
+    args.append(text[start:].strip())
+    return args
+
+
+def _eval_findnonnull(valobj, args, context):
+    if len(args) != 2:
+        return None
+    base = _substitute_context(args[0], context)
+    count_expr = _substitute_context(args[1], context)
+    count = _eval_int_expression(valobj, count_expr)
+    if count is None:
+        return None
+    for index in range(max(0, min(count, 100000))):
+        value, error = _eval_value(valobj, "({})[{}]".format(base, index))
+        if error:
+            continue
+        try:
+            if _value_as_int(value) != 0:
+                return str(index)
+        except Exception:
+            continue
+    return "-1"
+
+
+def _eval_supported_intrinsic(valobj, expression, context):
+    expression = expression.strip()
+    if expression.startswith("__findnonnull(") and expression.endswith(")"):
+        return _eval_findnonnull(
+            valobj,
+            _split_top_level_args(expression[len("__findnonnull(") : -1]),
+            context,
+        )
+    return None
+
+
+def _execute_custom_exec(valobj, statement, context):
+    statement = (statement or "").strip().rstrip(";").strip()
+    if not statement:
+        return
+
+    match = re.match(r"^([A-Za-z_]\\w*)\\s*(\\+\\+|--)$", statement)
+    if match:
+        name, op = match.groups()
+        current = context.get(name, name)
+        delta = "1" if op == "++" else "-1"
+        context[name] = _context_arithmetic_result(valobj, "({}) + ({})".format(current, delta))
+        return
+
+    match = re.match(r"^(\\+\\+|--)([A-Za-z_]\\w*)$", statement)
+    if match:
+        op, name = match.groups()
+        current = context.get(name, name)
+        delta = "1" if op == "++" else "-1"
+        context[name] = _context_arithmetic_result(valobj, "({}) + ({})".format(current, delta))
+        return
+
+    match = re.match(r"^([A-Za-z_]\\w*)\\s*(=|\\+=|-=|\\*=|/=|%=)\\s*(.+)$", statement)
+    if not match:
+        return
+
+    name, op, rhs = match.groups()
+    rhs = _substitute_context(rhs, context)
+    intrinsic_value = _eval_supported_intrinsic(valobj, rhs, context)
+    if op == "=":
+        context[name] = intrinsic_value if intrinsic_value is not None else "({})".format(rhs)
+        return
+
+    current = context.get(name, name)
+    operator = op[:-1]
+    context[name] = _context_arithmetic_result(
+        valobj,
+        "({}) {} ({})".format(current, operator, rhs),
+    )
+
+
+def _execute_custom_steps(valobj, steps, context, out, max_items, budget):
+    for step in steps:
+        if budget[0] <= 0 or len(out) >= max_items:
+            return "stop"
+        budget[0] -= 1
+
+        kind = step.get("kind")
+        condition = step.get("condition")
+
+        if kind == "Exec":
+            if _condition_matches(valobj, condition, context):
+                _execute_custom_exec(valobj, step.get("expression"), context)
+        elif kind == "Item":
+            if not _condition_matches(valobj, condition, context):
+                continue
+            expression = _substitute_context(
+                _strip_natvis_format(step.get("expression") or "0"),
+                context,
+            )
+            raw_name = step.get("name")
+            if raw_name:
+                name = (
+                    _render_display(valobj, raw_name, context)
+                    if "{" in raw_name
+                    else _substitute_context(raw_name, context)
+                )
+            else:
+                name = "[{}]".format(len(out))
+            out.append({"name": name, "expression": expression})
+        elif kind == "Break":
+            if _condition_matches(valobj, condition, context):
+                return "break"
+        elif kind == "If":
+            if _condition_matches(valobj, condition, context):
+                result = _execute_custom_steps(
+                    valobj, step.get("children") or [], context, out, max_items, budget
+                )
+                if result:
+                    return result
+        elif kind == "Loop":
+            while budget[0] > 0 and len(out) < max_items:
+                if condition and not _condition_matches(valobj, condition, context):
+                    break
+                result = _execute_custom_steps(
+                    valobj, step.get("children") or [], context, out, max_items, budget
+                )
+                if result == "break":
+                    break
+                if result == "stop":
+                    return "stop"
+    return None
+
+
+def _build_custom_list_children(valobj, custom_list):
+    if not _condition_matches(valobj, custom_list.get("condition")):
+        return []
+
+    context = {}
+    for variable in custom_list.get("variables") or []:
+        name = variable.get("name")
+        initial = variable.get("initial_value")
+        if name and initial is not None:
+            context[name] = "({})".format(_substitute_context(initial, context))
+
+    size = None
+    if custom_list.get("size"):
+        size = _eval_int_expression(
+            valobj,
+            _substitute_context(custom_list["size"], context),
+        )
+
+    max_items = custom_list.get("max_items_per_view") or size or 1000
+    if size is not None:
+        max_items = min(max_items, size)
+    max_items = max(0, int(max_items))
+
+    budget = [max(1000, max_items * 100)]
+    out = []
+    _execute_custom_steps(
+        valobj,
+        custom_list.get("steps") or [],
+        context,
+        out,
+        max_items,
+        budget,
+    )
+    return out
+
+
 class NatvisSyntheticProvider:
     def __init__(self, valobj, internal_dict):
         self.valobj = valobj
         self.spec = _find_spec(valobj) or {}
         self.items = []
         self.array_items = self.spec.get("array_items")
+        self.custom_children = []
         self.array_size = 0
         self.array_pointer = None
         self.update()
@@ -438,6 +825,7 @@ class NatvisSyntheticProvider:
     def update(self):
         self.array_size = 0
         self.array_pointer = None
+        self.custom_children = []
         self.items = [
             item for item in self.spec.get("items") or []
             if _condition_matches(self.valobj, item.get("condition"))
@@ -449,13 +837,15 @@ class NatvisSyntheticProvider:
             if size_value is not None:
                 self.array_size = int(size_value.GetValueAsUnsigned())
             self.array_pointer, _ = _eval_value(self.valobj, self.array_items["value_pointer"])
+        for custom_list in self.spec.get("custom_list_items") or []:
+            self.custom_children.extend(_build_custom_list_children(self.valobj, custom_list))
         return False
 
     def has_children(self):
         return self.num_children() > 0
 
     def num_children(self):
-        return len(self.items) + self.array_size
+        return len(self.items) + self.array_size + len(self.custom_children)
 
     def get_child_index(self, name):
         for index, item in enumerate(self.items):
@@ -468,6 +858,10 @@ class NatvisSyntheticProvider:
                 return -1
             if 0 <= array_index < self.array_size:
                 return len(self.items) + array_index
+        custom_offset = len(self.items) + self.array_size
+        for index, child in enumerate(self.custom_children):
+            if child["name"] == name:
+                return custom_offset + index
         return -1
 
     def get_child_at_index(self, index):
@@ -479,10 +873,16 @@ class NatvisSyntheticProvider:
             return self._make_expression_child(item["name"], item["expression"])
 
         array_index = index - len(self.items)
-        return self._make_array_child(array_index)
+        if array_index < self.array_size:
+            return self._make_array_child(array_index)
+
+        custom_index = array_index - self.array_size
+        child = self.custom_children[custom_index]
+        return self._make_expression_child(child["name"], child["expression"])
 
     def _make_expression_child(self, name, expression):
         rendered_name = _render_display(self.valobj, name) if "{" in name else name
+        expression = _strip_natvis_format(expression)
         try:
             return self.valobj.CreateValueFromExpression(rendered_name, expression)
         except Exception:
@@ -521,7 +921,7 @@ def __lldb_init_module(debugger, internal_dict):
                     _quote_lldb(__name__ + ".summary_provider"),
                 )
             )
-        if spec.get("items") or spec.get("array_items"):
+        if spec.get("items") or spec.get("array_items") or spec.get("custom_list_items"):
             debugger.HandleCommand(
                 "type synthetic add -w {} -x {} --python-class {}".format(
                     _quote_lldb(CATEGORY),
